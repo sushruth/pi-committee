@@ -2,7 +2,14 @@
 
 A [pi](https://github.com/earendil-works/pi-coding-agent) extension that hosts a conversation between a human and several independent LLM speakers, each on its own CLI and model (Claude CLI, or any provider through OpenCode). Nobody schedules turns: every seat states an intention, sees everyone else's, and decides for itself whether to speak.
 
-Install once, from GitHub:
+No pi yet? It needs [Bun](https://bun.sh):
+
+```
+curl -fsSL https://bun.sh/install | bash
+bun install -g @earendil-works/pi-coding-agent
+```
+
+Then install this package once, from GitHub:
 
 ```
 pi install https://github.com/sushruth/pi-committee
