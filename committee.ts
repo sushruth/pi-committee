@@ -372,8 +372,8 @@ export default function (pi: ExtensionAPI) {
       if (args.trim() === "reset") {
         if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
         const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
-        const ok = await ctx.ui.select(`Remove this folder's committee: ${speakers.length} seats, ${n} messages, every session? committee.json and committee/ are deleted.`, ["keep it", "reset"]);
-        if (ok !== "reset") return;
+        const ok = await ctx.ui.select(`Are you sure? This removes the folder's committee: ${speakers.length} seats, ${n} messages, every session? committee.json and committee/ are deleted.`, ["no, keep it", "yes, I am sure"]);
+        if (ok !== "yes, I am sure") return;
         for (const s of speakers) s.session.close();
         rmSync(seatsPath, { force: true }); rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true });
         events.length = 0; cycleNo = 0; floorHolder = null; lastLedger.clear(); openSeat = null;
