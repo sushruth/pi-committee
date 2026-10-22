@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { Speaker, opencodeVariants, type Cli, type Tools, type TurnResult } from "./speaker.ts";
+import { Speaker, modelWindow, opencodeVariants, type Cli, type Tools, type TurnResult } from "./speaker.ts";
 import intentionSchema from "./schemas/intention.schema.json";
 import responseSchema from "./schemas/response.schema.json";
 
@@ -37,7 +37,7 @@ interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona
 interface Ghost { id: string; cli: Cli; model: string; thinking?: string; left: string }
 type Kind = "human" | "speak" | "error" | "intention" | "usage" | "tool";
 interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown }
-interface Stat { state: string; since: number; activity?: string; ctx?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; lastReply?: string }
+interface Stat { state: string; since: number; activity?: string; ctx?: number; window?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; lastReply?: string }
 interface Saved { cli: Cli; model: string; thinking?: string; tools?: Tools; session_id?: string; sent: number; rules?: string }
 const PUBLIC: Kind[] = ["human", "speak", "error"]; // "tool" events from older logs are history only
 
@@ -58,6 +58,11 @@ export default function (pi: ExtensionAPI) {
   // ---- sessions: resume a speaker's native session only if cli+model match what was saved
   const saved: Record<string, Saved> = existsSync(sessPath) ? JSON.parse(readFileSync(sessPath, "utf8")) : {};
   const makeSeat = (meta: Seat) => {
+    const seat = makeSeat0(meta);
+    modelWindow(meta.cli, meta.model, cwd).then((w) => { seat.stat.window = w || undefined; refresh(); });
+    return seat;
+  };
+  const makeSeat0 = (meta: Seat) => {
     const prev = saved[meta.id];
     const match = prev && prev.cli === meta.cli && prev.model === meta.model && (prev.thinking ?? "") === (meta.thinking ?? "") && (prev.tools ?? "") === (meta.tools ?? "");
     return {
@@ -102,7 +107,7 @@ export default function (pi: ExtensionAPI) {
   const tag = (id: string) => ansi(colorOf(id), `● ${id}`);
   const stateColor = (st: string) => st.startsWith("err") ? 196 : st === "thinking" ? 220 : st === "working" || st === "replying" ? 214 : st === "spoke" ? 42 : st === "idle" ? 244 : 250;
   const glyph = (st: string) => st === "idle" ? "·" : st.startsWith("err") ? "✗" : st === "thinking" ? "◌" : st === "working" ? "⚙" : st === "replying" ? "●" : st === "spoke" ? "✓" : "○";
-  const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
+  const fmt = (n: number) => (n < 1000 ? `${n}` : n < 1_000_000 ? `${(n / 1000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(2)}M`);
 
   // ---- public state (append-only; replayed from disk on start)
   const events: Event[] = [];
@@ -136,8 +141,7 @@ export default function (pi: ExtensionAPI) {
     const s = byId(r.speaker); if (!s) return;
     s.stat.calls++;
     if (r.usage) { s.stat.fresh += r.usage.fresh; s.stat.cached += r.usage.cached; s.stat.out += r.usage.out; s.stat.cost += r.usage.cost ?? 0;
-      // claude sums every tool step into one result, so its input is not a context size; the others report the last step
-      if (s.meta.cli !== "claude" && !r.tools) s.stat.ctx = r.usage.fresh + r.usage.cached; }
+      if (r.usage.ctx) s.stat.ctx = r.usage.ctx; }
     publish({ author: r.speaker, kind: "usage", text: `${phase}: fresh ${r.usage?.fresh ?? "?"} cached ${r.usage?.cached ?? "?"} out ${r.usage?.out ?? "?"}${r.usage?.cost != null ? ` $${r.usage.cost.toFixed(4)}` : ""}${r.resumed ? " (resumed)" : ""}`, data: { phase, ...r.usage, resumed: r.resumed, ok: r.ok } });
   };
 
@@ -223,10 +227,20 @@ export default function (pi: ExtensionAPI) {
     const modelW = Math.min(24, Math.max(...speakers.map((s) => short(s).length)));
     const dim = (t: string) => ansi(244, t);
     const spend = (s: (typeof speakers)[number]) => s.stat.fresh + s.stat.cached + s.stat.out;
-    const header = `${col("", idW)} ${col(dim("cli/model"), modelW)} ${col(dim("calls"), 6, true)} ${col(dim("tokens"), 9, true)} ${col(dim("context"), 9, true)} ${col(dim("$"), 8, true)}  ${dim("state")}`;
-    const rows = speakers.map((s) => `${col(tag(s.meta.id), idW)} ${col(dim(truncateToWidth(short(s), modelW)), modelW)} ${col(String(s.stat.calls), 6, true)} ${col(fmt(spend(s)), 9, true)} ${col(s.stat.ctx ? fmt(s.stat.ctx) : dim("?"), 9, true)} ${col(s.stat.cost ? s.stat.cost.toFixed(3) : dim("n/a"), 8, true)}  ${ansi(stateColor(s.stat.state), `${glyph(s.stat.state)} ${s.stat.state}`)}`);
+    const header = `${col("", idW)} ${col(dim("cli/model"), modelW)} ${col(dim("calls"), 6, true)} ${col(dim("tokens"), 9, true)} ${col(dim("context"), 13, true)} ${col(dim("$"), 8, true)}  ${dim("state")}`;
+    const rows = speakers.map((s) => `${col(tag(s.meta.id), idW)} ${col(dim(truncateToWidth(short(s), modelW)), modelW)} ${col(String(s.stat.calls), 6, true)} ${col(fmt(spend(s)), 9, true)} ${col((s.stat.ctx ? fmt(s.stat.ctx) : "?") + dim("/" + (s.stat.window ? fmt(s.stat.window) : "?")), 13, true)} ${col(s.stat.cost ? s.stat.cost.toFixed(3) : dim("n/a"), 8, true)}  ${ansi(stateColor(s.stat.state), `${glyph(s.stat.state)} ${s.stat.state}`)}`);
     widgetTui = undefined;
     ui?.setWidget("committee", [header, ...rows]);
+  };
+  // one bar for the whole room: each seat's used context as a slice of the summed windows, in the seat's color; the rest dim
+  const contextBar = (cells: number, total: number) => {
+    if (!total) return "";
+    let out = "", filled = 0;
+    for (const s of speakers) {
+      const n = Math.round(((s.stat.ctx ?? 0) / total) * cells);
+      if (n > 0) { out += ansi(colorOf(s.meta.id), "█".repeat(n)); filled += n; }
+    }
+    return out + ansi(238, "░".repeat(Math.max(0, cells - filled)));
   };
   const setState = (id: string, state: string) => { const s = byId(id); if (s && s.stat.state !== state) { s.stat.state = state; s.stat.since = Date.now(); if (!BUSY.has(state)) s.stat.activity = undefined; } refresh(); };
   const BUSY = new Set(["thinking", "working", "replying"]);
@@ -240,8 +254,9 @@ export default function (pi: ExtensionAPI) {
     footerFactory = (_tui, theme) => ({
       dispose() {}, invalidate() {},
       render(width: number) {
-        const t = speakers.reduce((a, s) => ({ tokens: a.tokens + s.stat.fresh + s.stat.cached + s.stat.out, cost: a.cost + s.stat.cost, calls: a.calls + s.stat.calls }), { tokens: 0, cost: 0, calls: 0 });
-        return [truncateToWidth(theme.fg("dim", `committee host: pi extension · ${speakers.length} speakers · cycle ${cycleNo} · ${t.calls} calls · ${fmt(t.tokens)} tokens · $${t.cost.toFixed(2)}`), width)];
+        const t = speakers.reduce((a, s) => ({ used: a.used + (s.stat.ctx ?? 0), window: a.window + (s.stat.window ?? 0), cost: a.cost + s.stat.cost, calls: a.calls + s.stat.calls }), { used: 0, window: 0, cost: 0, calls: 0 });
+        const left = theme.fg("dim", `⚒ ${speakers.length} seats · cycle ${cycleNo} · ${t.calls} calls · $${t.cost.toFixed(2)} · context ${fmt(t.used)} / ${t.window ? fmt(t.window) : "?"} `);
+        return [truncateToWidth(left + contextBar(Math.max(10, Math.min(40, width - visibleWidth(left) - 1)), t.window), width)];
       },
     });
     if (speakers.length) await checkEngines(ctx);

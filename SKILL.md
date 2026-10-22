@@ -68,7 +68,7 @@ Thinking levels are per seat. claude: `--effort` low to max. pi: `--thinking` of
 
 ## Usage is logged, never estimated
 
-Every call appends a `usage` event: phase, fresh, cached, out, cost when the provider reports it, and whether the session was resumed. `/usage` shows one spend number per seat (every token billed: in, cached, out, across every tool step) and the last call's context size where the CLI reports a per-step figure (not claude, whose result sums all steps). The footer shows the room's total tokens and cost. When asked where tokens go, read events.jsonl; the per-CLI normalisation is in speaker.ts (claude `input_tokens` excludes cache reads, codex `inputTokens` includes them, cursor excludes them, opencode reports `tokens.cache.read`).
+Every call appends a `usage` event: phase, fresh, cached, out, cost when the provider reports it, and whether the session was resumed. `/usage` shows one spend number per seat (every token billed: in, cached, out, across every tool step) and the last call's context size where the CLI reports a per-step figure (not claude, whose result sums all steps). The footer shows cost and the room's live context: the sum of each seat's current context (input of its last model step, which every CLI reports per step) over the sum of their model windows (opencode `/api/model` limit, pi `--list-models`, claude 200k or 1M for `[1m]` models), drawn as one bar whose filled part is split by seat color. When asked where tokens go, read events.jsonl; the per-CLI normalisation is in speaker.ts (claude `input_tokens` excludes cache reads, codex `inputTokens` includes them, cursor excludes them, opencode reports `tokens.cache.read`).
 
 ## Files
 

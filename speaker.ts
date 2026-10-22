@@ -38,7 +38,7 @@ export interface SpeakerOpts {
 export interface ToolWork { calls: number; chars: number }
 export type Tools = "read" | "all";
 
-export interface Usage { fresh: number; cached: number; out: number; cost?: number }
+export interface Usage { fresh: number; cached: number; out: number; cost?: number; /** input of the last model step: the session's live context size */ ctx?: number }
 
 export interface TurnResult {
   speaker: string;
@@ -79,6 +79,7 @@ export class Speaker {
   private ready: Promise<void> = Promise.resolve();
   private oc?: { base: string; auth: string };
   private work: ToolWork = { calls: 0, chars: 0 };
+  private lastCtx?: number;
   private nudged = false;
   private act(text: string | null) { this.opts.onActivity?.(text); }
   private didTool(output: unknown) { this.act(null); this.work.calls++; this.work.chars += (typeof output === "string" ? output : JSON.stringify(output ?? "")).length; }
@@ -142,12 +143,13 @@ export class Speaker {
     try { ev = JSON.parse(line); } catch { return; }
     if (this.opts.cli === "codex") return this.onCodex(ev);
     if (ev.session_id) this.session_id = ev.session_id;
+    if (ev.type === "assistant" && ev.message?.usage) { const su = ev.message.usage; this.lastCtx = (su.input_tokens ?? 0) + (su.cache_read_input_tokens ?? 0) + (su.cache_creation_input_tokens ?? 0); }
     if (ev.type === "assistant") for (const b of ev.message?.content ?? []) if (b?.type === "tool_use") this.act(`${b.name} ${brief(b.input)}`);
     if (ev.type === "user") for (const b of ev.message?.content ?? []) if (b?.type === "tool_result") this.didTool(Array.isArray(b.content) ? b.content.map((p: any) => p.text ?? "").join("\n") : b.content);
     if (ev.type !== "result") return;
     if (ev.is_error) return this.settle({ speaker: this.id, ok: false, error: String(ev.result ?? ev.subtype), raw: ev });
     const u = ev.usage ?? {};
-    this.settleJson(String(ev.result ?? ""), ev, { fresh: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), cached: u.cache_read_input_tokens ?? 0, out: u.output_tokens ?? 0, cost: ev.total_cost_usd });
+    this.settleJson(String(ev.result ?? ""), ev, { fresh: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), cached: u.cache_read_input_tokens ?? 0, out: u.output_tokens ?? 0, cost: ev.total_cost_usd, ctx: this.lastCtx });
   }
 
   private onCodex(ev: any) {
@@ -206,7 +208,7 @@ export class Speaker {
       if (!last) return this.settle({ speaker: this.id, ok: false, error: `pi exit ${code}: ${err.slice(-300)}` });
       if (last.stopReason === "error") return this.settle({ speaker: this.id, ok: false, error: String(last.errorMessage ?? "error").slice(0, 300), raw: last });
       const u = last.usage ?? {};
-      this.settleJson((last.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join(""), last, { fresh: (u.input ?? 0) + (u.cacheWrite ?? 0), cached: u.cacheRead ?? 0, out: u.output ?? 0, cost: u.cost?.total });
+      this.settleJson((last.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join(""), last, { fresh: (u.input ?? 0) + (u.cacheWrite ?? 0), cached: u.cacheRead ?? 0, out: u.output ?? 0, cost: u.cost?.total, ctx: (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0) });
       this.resumed = true;
     });
     return proc;
@@ -252,7 +254,8 @@ export class Speaker {
     const last = steps[steps.length - 1];
     const reply = (last.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
     const u = steps.reduce((a: any, m: any) => { const tk = m.tokens ?? {}; return { fresh: a.fresh + (tk.input ?? 0) + (tk.cache?.write ?? 0), cached: a.cached + (tk.cache?.read ?? 0), out: a.out + (tk.output ?? 0) + (tk.reasoning ?? 0), cost: a.cost + (m.cost ?? 0) }; }, { fresh: 0, cached: 0, out: 0, cost: 0 });
-    this.settleJson(reply, last, u);
+    const lt = last.tokens ?? {};
+    this.settleJson(reply, last, { ...u, ctx: (lt.input ?? 0) + (lt.cache?.read ?? 0) + (lt.cache?.write ?? 0) });
   }
 
   // ---------- common
@@ -352,6 +355,27 @@ function codexHome(cwd: string) {
 }
 
 /** thinking variants opencode knows for a model ("provider/id"), from the live model list; empty when unknown */
+/** context window of a model in tokens: opencode's model list, pi's --list-models, claude's 200k default; 0 when unknown */
+export async function modelWindow(cli: Cli, model: string, cwd: string): Promise<number> {
+  if (cli === "claude") return model.includes("[1m]") ? 1_000_000 : 200_000;
+  if (cli === "opencode") {
+    try {
+      const oc = await opencodeServer(cwd);
+      const j: any = await (await fetch(oc.base + "/api/model", { headers: { authorization: oc.auth } })).json();
+      const m = (j?.data ?? []).find((x: any) => `${x.providerID}/${x.id}` === model || x.id === model);
+      return m?.limit?.context ?? 0;
+    } catch { return 0; }
+  }
+  if (cli === "pi") {
+    const out = await new Promise<string>((res) => { const p = spawn("pi", ["--list-models"], { stdio: ["ignore", "pipe", "ignore"] }); let o = ""; p.stdout!.on("data", (d) => (o += d)); p.on("exit", () => res(o)); });
+    const [prov, ...rest] = model.split("/"); const id = rest.join("/");
+    const row = out.split("\n").map((l) => l.trim().split(/\s+/)).find((p) => p[0] === prov && p[1] === id);
+    const k = row?.[2] ?? ""; const n = parseFloat(k);
+    return /M$/i.test(k) ? Math.round(n * 1_000_000) : /K$/i.test(k) ? Math.round(n * 1_000) : n || 0;
+  }
+  return 0;
+}
+
 export async function opencodeVariants(cwd: string, model: string): Promise<string[]> {
   try {
     const oc = await opencodeServer(cwd);
