@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { Speaker, modelWindow, opencodeVariants, type Cli, type Tools, type TurnResult } from "./speaker.ts";
+import { Speaker, codexModels, modelWindow, opencodeVariants, type Cli, type Tools, type TurnResult } from "./speaker.ts";
 import intentionSchema from "./schemas/intention.schema.json";
 import responseSchema from "./schemas/response.schema.json";
 
@@ -300,7 +300,7 @@ export default function (pi: ExtensionAPI) {
   const run = (cmd: string, args: string[]) => new Promise<string>((res) => execFile(cmd, args, { maxBuffer: 1 << 24 }, (_e, out) => res(String(out ?? ""))));
   const modelsFor = async (cli: Cli): Promise<string[]> => {
     if (cli === "claude") return ["opus", "sonnet", "haiku"];
-    if (cli === "codex") { try { const j = JSON.parse(readFileSync(join(homedir(), ".codex", "models_cache.json"), "utf8")); return (j.models ?? []).map((m: any) => m.slug ?? m.id).filter(Boolean); } catch { return []; } }
+    if (cli === "codex") return codexModels().map((m: any) => m.slug).filter(Boolean);
     if (cli === "cursor") return (await run("cursor-agent", ["--list-models"])).split("\n").map((l) => l.split(" - ")[0].trim()).filter((l) => l && !l.startsWith("Available"));
     if (cli === "pi") return (await run("pi", ["--list-models"])).split("\n").slice(1).map((l) => l.trim().split(/\s+/)).filter((p) => p.length > 1).map((p) => `${p[0]}/${p[1]}`);
     return (await run("opencode", ["models"])).split("\n").map((l) => l.trim()).filter((l) => l.includes("/"));
@@ -348,7 +348,8 @@ export default function (pi: ExtensionAPI) {
   const thinkingFor = (cli: Cli) => cli === "claude" ? ["low", "medium", "high", "xhigh", "max"] : cli === "codex" ? ["minimal", "low", "medium", "high", "xhigh"] : cli === "opencode" ? ["none", "minimal", "low", "medium", "high", "xhigh", "max"] : cli === "pi" ? ["off", "minimal", "low", "medium", "high", "xhigh", "max"] : [];
   const pickThinking = async (ctx: ExtensionContext, cli: Cli, current?: string, model?: string) => {
     // opencode variants differ per model; the live list beats the generic ladder
-    const list = cli === "opencode" && model ? (await opencodeVariants(cwd, model)).concat() : thinkingFor(cli);
+    const codexLevels = cli === "codex" ? (codexModels().find((m: any) => m.slug === model)?.supported_reasoning_levels ?? []).map((l: any) => l.effort) : [];
+    const list = cli === "opencode" && model ? (await opencodeVariants(cwd, model)).concat() : codexLevels.length ? codexLevels : thinkingFor(cli);
     if (cli === "opencode" && model && !list.length) ctx.ui.notify("opencode lists no variants for this model; the generic ladder is shown, the model may reject some", "warning");
     if (cli === "opencode" && !list.length) list.push(...thinkingFor(cli));
     if (!list.length) { ctx.ui.notify("cursor sets thinking in the model id (e.g. glm-5.2-high)", "info"); return current; }
@@ -369,10 +370,10 @@ export default function (pi: ExtensionAPI) {
     opencode: "recommended · any provider you are logged into, ~100 fresh tokens per call",
     claude: "recommended · ~1.5k tokens per call with the committee flags",
     pi: "recommended · any provider pi is logged into, its own prompt replaced",
-    codex: "not supported yet · ~27k tokens of its own prompt on every call",
-    cursor: "not supported yet · ~11k tokens of its own prompt on every call",
+    codex: "recommended · ~2.4k tokens per call with the committee config, ~200 fresh",
+    cursor: "not supported yet · ~13.5k tokens of its own prompt on every call, no flag removes it",
   };
-  const SUPPORTED: Cli[] = ["opencode", "claude", "pi"];
+  const SUPPORTED: Cli[] = ["opencode", "claude", "pi", "codex"];
   const installed = async (): Promise<Cli[]> => {
     const out: Cli[] = [];
     for (const cli of ["claude", "codex", "cursor", "opencode", "pi"] as Cli[]) if ((await run("which", [cli === "cursor" ? "cursor-agent" : cli])).trim()) out.push(cli);

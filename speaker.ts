@@ -8,13 +8,13 @@
 //           (+ --resume <id>); JSON user messages on stdin, JSONL events on stdout.
 // codex:    long-lived `codex app-server` (JSON-RPC over stdio); thread/start or thread/resume,
 //           turn/start per message; answer = last agentMessage before turn/completed.
-// cursor:   no stream mode: one `cursor-agent -p --trust` process per message, --resume <id>.
+// cursor:   one `cursor-agent -p --trust --output-format stream-json` process per message, --resume <id>.
 // opencode: one shared `opencode serve` per host, one session per speaker over HTTP
 //           (any provider opencode is logged into); a tool-less "speaker" agent is passed inline.
 // pi:       one `pi -p --mode json` process per message, --session-id resumes; its own system prompt is replaced.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -61,6 +61,7 @@ const CLAUDE_TOOLS = "Read,Grep,Glob,Bash";
 const promptFor = (t?: Tools) => t === "all" ? ALL_PROMPT : t === "read" ? TOOLS_PROMPT : SPEAKER_PROMPT;
 const OC_TOOLS_PERMISSION = { "*": "deny", read: "allow", grep: "allow", glob: "allow", list: "allow", bash: "allow" };
 const PI_READ_TOOLS = "read,grep,find,ls,bash";
+const CODEX_NOT_TOOLS = ["userMessage", "agentMessage", "reasoning", "plan", "hookPrompt", "contextCompaction"];
 const brief = (input: unknown) => { const o: any = input ?? {}; const s = String(o.command ?? o.pattern ?? o.path ?? o.file_path ?? o.query ?? JSON.stringify(o)); return s.replace(/\s+/g, " ").slice(0, 90); };
 
 export class Speaker {
@@ -81,12 +82,15 @@ export class Speaker {
   private work: ToolWork = { calls: 0, chars: 0 };
   private lastCtx?: number;
   private nudged = false;
+  private codexTotal?: any;
+  private codexBase?: any;
   private act(text: string | null) { this.opts.onActivity?.(text); }
   private didTool(output: unknown) { this.act(null); this.work.calls++; this.work.chars += (typeof output === "string" ? output : JSON.stringify(output ?? "")).length; }
 
   constructor(private opts: SpeakerOpts) {
     this.id = opts.id;
     this.session_id = opts.session_id;
+    if (opts.cli === "cursor" && !opts.tools) { this.ready = Promise.reject(new Error("cursor-agent has no flag that turns its tools off; give this seat tools \"read\" (--mode ask) or \"all\"")); this.ready.catch(() => {}); return; }
     if (opts.cli === "cursor" || opts.cli === "pi") { this.resumed = !!opts.session_id; if (opts.cli === "pi") this.session_id ??= randomUUID(); return; }
     if (opts.cli === "opencode") { this.ready = this.opencodeInit(); return; }
     this.proc = this.spawnLongLived();
@@ -107,7 +111,7 @@ export class Speaker {
          "--system-prompt", promptFor(this.opts.tools), "--setting-sources", "",
          ...(this.opts.thinking ? ["--effort", this.opts.thinking] : []),
          ...(session_id ? ["--resume", session_id] : [])]
-      : ["app-server"];
+      : ["app-server", ...(this.opts.tools ? ["-c", "features.shell_tool=true", "-c", "features.unified_exec=true", "-c", "features.code_mode_host=true"] : [])];
     const env = cli === "codex" ? { ...process.env, CODEX_HOME: codexHome(cwd ?? process.cwd()) } : process.env;
     const proc = spawn(cli, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     proc.stderr!.on("data", (d) => (this.stderr += d));
@@ -128,7 +132,7 @@ export class Speaker {
   private async codexInit() {
     await this.rpc("initialize", { clientInfo: { name: "committee", version: "0" } });
     this.proc!.stdin!.write(JSON.stringify({ method: "initialized" }) + "\n");
-    const common = { model: this.opts.model, sandbox: "read-only", approvalPolicy: "never", cwd: this.opts.cwd ?? process.cwd(), baseInstructions: SPEAKER_PROMPT };
+    const common = { model: this.opts.model, sandbox: this.opts.tools === "all" ? "workspace-write" : "read-only", approvalPolicy: "never", cwd: this.opts.cwd ?? process.cwd(), baseInstructions: promptFor(this.opts.tools) };
     if (this.opts.session_id) {
       const r = await this.rpc("thread/resume", { threadId: this.opts.session_id, ...common });
       if (r?.thread?.id) { this.session_id = r.thread.id; this.resumed = true; return; }
@@ -157,8 +161,19 @@ export class Speaker {
       const w = this.rpcWaiters.get(ev.id)!; this.rpcWaiters.delete(ev.id);
       return w(ev.error ? { error: ev.error } : ev.result);
     }
-    if (ev.method === "item/completed" && ev.params?.item?.type === "agentMessage") this.lastText = ev.params.item.text;
-    if (ev.method === "thread/tokenUsage/updated") { const u = ev.params?.tokenUsage?.last; if (u) this.lastUsage = { fresh: (u.inputTokens ?? 0) - (u.cachedInputTokens ?? 0), cached: u.cachedInputTokens ?? 0, out: u.outputTokens ?? 0 }; }
+    const item = ev.params?.item;
+    if (ev.method === "item/completed" && item?.type === "agentMessage") this.lastText = item.text;
+    if (item && !CODEX_NOT_TOOLS.includes(item.type)) {
+      if (ev.method === "item/started") this.act(`${item.type === "commandExecution" ? "shell" : item.tool ?? item.type} ${brief(item.command ?? item.arguments ?? item.changes ?? item.query ?? "")}`);
+      if (ev.method === "item/completed") this.didTool(item.aggregatedOutput ?? item.result ?? item.contentItems ?? item.output ?? item.changes);
+    }
+    if (ev.method === "thread/tokenUsage/updated") {
+      // `total` is the thread's running sum over every model step; this turn's spend is its growth since turn/start
+      const { total, last } = ev.params?.tokenUsage ?? {};
+      const u = this.codexBase && total ? { inputTokens: total.inputTokens - this.codexBase.inputTokens, cachedInputTokens: total.cachedInputTokens - this.codexBase.cachedInputTokens, outputTokens: total.outputTokens - this.codexBase.outputTokens } : last;
+      if (u) this.lastUsage = { fresh: (u.inputTokens ?? 0) - (u.cachedInputTokens ?? 0), cached: u.cachedInputTokens ?? 0, out: u.outputTokens ?? 0, ctx: last?.inputTokens };
+      if (total) this.codexTotal = total;
+    }
     if (ev.method === "error") return this.settle({ speaker: this.id, ok: false, error: JSON.stringify(ev.params).slice(0, 300), raw: ev });
     if (ev.method !== "turn/completed") return;
     const turn = ev.params?.turn;
@@ -166,24 +181,26 @@ export class Speaker {
     this.settleJson(this.lastText, ev, this.lastUsage);
   }
 
-  // ---------- cursor: one process per message
-  private cursorOneShot(text: string, retry = true): ChildProcess {
-    const { model, cwd } = this.opts;
-    const args = ["-p", "--trust", "--mode", "ask", "--model", model, "--output-format", "json"];
+  // ---------- cursor: one process per message. Its usage is one sum over every model step, so no ctx.
+  // --mode ask is its read-only mode; it has no flag that turns tools off (see the constructor)
+  private cursorOneShot(text: string): ChildProcess {
+    const { model, cwd, tools } = this.opts;
+    const args = ["-p", "--trust", ...(tools === "all" ? ["--force"] : ["--mode", "ask"]), "--model", model, "--output-format", "stream-json"];
     if (this.session_id) args.push("--resume", this.session_id);
     const proc = spawn("cursor-agent", [...args, text], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "";
-    proc.stdout!.on("data", (d) => (out += d));
+    let err = "", buf = "", result: any;
     proc.stderr!.on("data", (d) => (err += d));
-    proc.on("exit", (code) => {
-      let ev: any;
-      try { ev = JSON.parse(out); } catch { return this.settle({ speaker: this.id, ok: false, error: `exit ${code}, non-JSON: ${(out || err).slice(0, 200)}` }); }
+    proc.stdout!.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); let ev: any; try { ev = JSON.parse(line); } catch { continue; }
       if (ev.session_id) this.session_id = ev.session_id;
-      if (ev.is_error) return this.settle({ speaker: this.id, ok: false, error: String(ev.result).slice(0, 300), raw: ev });
-      const result = String(ev.result ?? "");
-      if (parseJson(result) === undefined && retry) { this.cursorOneShot("Your previous reply was not valid JSON (it was cut off or had prose). Send the full JSON object again, nothing else.", false); return; }
-      const u = ev.usage ?? {};
-      this.settleJson(result, ev, { fresh: (u.inputTokens ?? 0) + (u.cacheWriteTokens ?? 0), cached: u.cacheReadTokens ?? 0, out: u.outputTokens ?? 0 });
+      if (ev.type === "tool_call") { const [name, call]: [string, any] = Object.entries(ev.tool_call ?? {}).find(([k]) => k.endsWith("ToolCall")) ?? ["tool", {}];
+        if (ev.subtype === "started") this.act(`${name.replace(/ToolCall$/, "")} ${brief(call.args)}`);
+        else this.didTool(call.result?.success?.content ?? call.result); }
+      if (ev.type === "result") result = ev; } });
+    proc.on("exit", (code) => {
+      if (!result) return this.settle({ speaker: this.id, ok: false, error: `cursor exit ${code}: ${err.slice(-300)}` });
+      if (result.is_error) return this.settle({ speaker: this.id, ok: false, error: String(result.result).slice(0, 300), raw: result });
+      const u = result.usage ?? {};
+      this.settleJson(String(result.result ?? ""), result, { fresh: (u.inputTokens ?? 0) + (u.cacheWriteTokens ?? 0), cached: u.cacheReadTokens ?? 0, out: u.outputTokens ?? 0 });
     });
     return proc;
   }
@@ -262,7 +279,7 @@ export class Speaker {
   private settleJson(text: string, raw: unknown, usage?: Usage) {
     const payload = parseJson(text);
     // models that just used tools often answer in prose; ask once for the same content as JSON
-    if (payload === undefined && !this.nudged && this.opts.cli !== "cursor") {
+    if (payload === undefined && !this.nudged) {
       if (this.opts.cli === "pi") this.resumed = true;
       this.nudged = true;
       this.dispatch("Your previous reply was prose, not JSON, so the room did not see it. Send the same content again as the JSON object the host asked for (put the prose in the text field).");
@@ -280,7 +297,7 @@ export class Speaker {
   }
 
   /** Send one message; `schema` is the JSON shape the reply must match (put in the prompt, checked locally). */
-  /** tools off for this one call (the intention phase): pi gets --no-tools, opencode the tool-less agent, claude is told */
+  /** tools off for this one call (the intention phase): pi gets --no-tools, opencode the tool-less agent; claude, codex and cursor are told */
   private noTools = false;
   async send(text: string, schema: object, timeoutMs = 120_000, opts: { noTools?: boolean } = {}): Promise<TurnResult> {
     this.noTools = !!opts.noTools && !!this.opts.tools;
@@ -290,7 +307,7 @@ export class Speaker {
     this.schema = schema;
     // small models copy an example reliably and echo a schema back; the schema stays the host's check
     const ex = (schema as any).examples?.[0];
-    const noToolsLine = this.noTools && this.opts.cli === "claude" ? "\nNo tools in this phase; just answer." : "";
+    const noToolsLine = this.noTools && (this.opts.cli === "claude" || this.opts.cli === "codex" || this.opts.cli === "cursor") ? "\nNo tools in this phase; just answer." : "";
     const prompt = ex ? `${text}${noToolsLine}\n\nReply with only one JSON object shaped like this, no prose:\n${JSON.stringify(ex)}`
       : `${text}\n\nReply with only JSON matching this schema, no prose:\n${JSON.stringify(schema)}`;
     this.nudged = false; this.work = { calls: 0, chars: 0 };
@@ -309,8 +326,8 @@ export class Speaker {
     } else if (this.opts.cli === "opencode") {
       this.opencodeTurn(prompt);
     } else if (this.opts.cli === "codex") {
-      this.lastText = ""; this.lastUsage = undefined;
-      this.rpc("turn/start", { threadId: this.session_id, input: [{ type: "text", text: prompt }], outputSchema: this.schema, ...(this.opts.thinking ? { effort: this.opts.thinking } : {}) })
+      this.lastText = ""; this.lastUsage = undefined; this.codexBase = this.codexTotal;
+      this.rpc("turn/start", { threadId: this.session_id, input: [{ type: "text", text: prompt }], ...(this.opts.thinking ? { effort: this.opts.thinking } : {}) })
         .then((res) => { if (res?.error) this.settle({ speaker: this.id, ok: false, error: JSON.stringify(res.error).slice(0, 300) }); });
     } else {
       this.proc!.stdin!.write(JSON.stringify({ type: "user", message: { role: "user", content: prompt } }) + "\n");
@@ -342,22 +359,44 @@ function parseJson(text: string): unknown {
 }
 
 // Codex reads ~/.codex (plugins, MCP servers, skills, AGENTS.md) into every thread.
-// Speakers get a private home with just the auth file and a minimal config.
+// Speakers get a private home with just the auth file and a config that drops every
+// optional prompt section and tool: ~2.3k tokens per call instead of ~12.6k (measured).
+// Seats with tools turn the shell back on with -c on their own app-server.
+const CODEX_CONFIG = `web_search = "disabled"
+include_permissions_instructions = false
+include_apps_instructions = false
+include_collaboration_mode_instructions = false
+include_environment_context = false
+
+[skills]
+include_instructions = false
+
+[skills.bundled]
+enabled = false
+
+[features]
+${["apps", "browser_use", "computer_use", "code_mode_host", "plugins", "multi_agent", "image_generation", "shell_tool", "unified_exec", "view_image", "sleep_tool", "goals", "hooks", "tool_suggest", "skill_search", "in_app_browser"].map((f) => `${f} = false`).join("\n")}
+`;
 function codexHome(cwd: string) {
   const home = join(cwd, "committee", "codex-home");
   if (!existsSync(home)) {
     mkdirSync(home, { recursive: true });
     const auth = join(homedir(), ".codex", "auth.json");
     if (existsSync(auth)) copyFileSync(auth, join(home, "auth.json"));
-    writeFileSync(join(home, "config.toml"), "[features]\napps = false\nbrowser_use = false\ncomputer_use = false\ncode_mode_host = false\n");
   }
+  writeFileSync(join(home, "config.toml"), CODEX_CONFIG);
   return home;
 }
 
-/** thinking variants opencode knows for a model ("provider/id"), from the live model list; empty when unknown */
-/** context window of a model in tokens: opencode's model list, pi's --list-models, claude's 200k default; 0 when unknown */
+/** codex's own model list (~/.codex/models_cache.json): slug, context_window, supported_reasoning_levels */
+export function codexModels(): any[] {
+  try { return JSON.parse(readFileSync(join(homedir(), ".codex", "models_cache.json"), "utf8")).models ?? []; } catch { return []; }
+}
+
+/** context window of a model in tokens: opencode's model list, pi's --list-models, codex's models_cache.json, claude's 200k default; 0 when unknown (cursor) */
 export async function modelWindow(cli: Cli, model: string, cwd: string): Promise<number> {
   if (cli === "claude") return model.includes("[1m]") ? 1_000_000 : 200_000;
+  if (cli === "codex") return codexModels().find((m: any) => m.slug === model)?.context_window ?? 0;
   if (cli === "opencode") {
     try {
       const oc = await opencodeServer(cwd);
@@ -376,6 +415,7 @@ export async function modelWindow(cli: Cli, model: string, cwd: string): Promise
   return 0;
 }
 
+/** thinking variants opencode knows for a model ("provider/id"), from the live model list; empty when unknown */
 export async function opencodeVariants(cwd: string, model: string): Promise<string[]> {
   try {
     const oc = await opencodeServer(cwd);
