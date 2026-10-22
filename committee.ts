@@ -100,8 +100,8 @@ export default function (pi: ExtensionAPI) {
   const palette = [39, 208, 141, 42, 213, 220, 51, 203];
   const colorOf = (id: string) => ghostOf(id) ? 240 : palette[Math.max(0, speakers.findIndex((s) => s.meta.id === id)) % palette.length];
   const tag = (id: string) => ansi(colorOf(id), `● ${id}`);
-  const stateColor = (st: string) => st.startsWith("err") ? 196 : st === "thinking" || st === "deciding" ? 220 : st === "speaking" ? 214 : st === "spoke" ? 42 : st === "idle" ? 244 : 250;
-  const glyph = (st: string) => st === "idle" ? "·" : st.startsWith("err") ? "✗" : st === "thinking" || st === "deciding" ? "◌" : st === "speaking" ? "●" : st === "spoke" ? "✓" : "○";
+  const stateColor = (st: string) => st.startsWith("err") ? 196 : st === "thinking" ? 220 : st === "working" || st === "replying" ? 214 : st === "spoke" ? 42 : st === "idle" ? 244 : 250;
+  const glyph = (st: string) => st === "idle" ? "·" : st.startsWith("err") ? "✗" : st === "thinking" ? "◌" : st === "working" ? "⚙" : st === "replying" ? "●" : st === "spoke" ? "✓" : "○";
   const fmt = (n: number) => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}k`);
 
   // ---- public state (append-only; replayed from disk on start)
@@ -553,13 +553,13 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     // one speaker wants the floor and nobody else does: nothing to weigh, let it speak
     if (candidates.length === 1) {
       const s = candidates[0];
-      setState(s.meta.id, "speaking");
+      setState(s.meta.id, s.meta.tools ? "working" : "replying");
       const r = await s.session.send(packet(s, "respond", `Nobody else wants to speak this cycle; you have the floor.${s.meta.tools ? " Use your tools now if your intention needed a lookup." : ""} Put the contribution in text with action "speak".\n`), responseSchema, budget(s));
       account(r, "respond"); saveSessions();
       return takeReply(r);
     }
 
-    for (const s of candidates) setState(s.meta.id, "deciding");
+    for (const s of candidates) setState(s.meta.id, s.meta.tools ? "working" : "replying");
     let spoke = 0;
     await Promise.all(candidates.map((s) =>
       s.session.send(packet(s, "respond", `Everyone's intentions:\n${summary}\nHold (action wait or silent, empty text) or respond now (action speak, contribution in text).${s.meta.tools ? " If you respond and your intention needed a lookup, use your tools first." : ""}\n`), responseSchema, budget(s))
