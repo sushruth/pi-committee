@@ -57,6 +57,11 @@
     },
     "target": {
       "type": "string"
+    },
+    "tool": {
+      "type": "string",
+      "maxLength": 160,
+      "description": "if you have tools and your turn needs a lookup: what you would run, one line; omit otherwise"
     }
   },
   "required": [

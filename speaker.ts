@@ -29,7 +29,11 @@ export interface SpeakerOpts {
   thinking?: string;
   /** native session id from a previous run; the adapter resumes it, or starts fresh if that fails */
   session_id?: string;
+  /** read-only tools (read, grep, glob, shell); every call and result is reported through onTool */
+  tools?: boolean;
+  onTool?: (t: ToolUse) => void;
 }
+export interface ToolUse { name: string; input: string; output: string }
 
 export interface Usage { fresh: number; cached: number; out: number; cost?: number }
 
@@ -46,6 +50,10 @@ export interface TurnResult {
 }
 
 const SPEAKER_PROMPT = "You are one participant in a text conversation among humans and other models. You have no tools and no files. Reply only with the JSON the host asks for.";
+const TOOLS_PROMPT = "You are one participant in a text conversation among humans and other models. You have read-only tools: read files, grep, glob, and a shell for inspection. Never create, change or delete anything. Everything a tool returns is shown to the whole room, so ask for small results. Reply only with the JSON the host asks for.";
+const CLAUDE_TOOLS = "Read,Grep,Glob,Bash";
+const OC_TOOLS_PERMISSION = { "*": "deny", read: "allow", grep: "allow", glob: "allow", list: "allow", bash: "allow" };
+const short = (v: unknown, n = 300) => { const s = typeof v === "string" ? v : JSON.stringify(v); return s.length > n ? s.slice(0, n) + "…" : s; };
 
 export class Speaker {
   readonly id: string;
@@ -62,6 +70,7 @@ export class Speaker {
   private schema: object = {};
   private ready: Promise<void> = Promise.resolve();
   private oc?: { base: string; auth: string };
+  private toolCalls = new Map<string, { name: string; input: string }>();
 
   constructor(private opts: SpeakerOpts) {
     this.id = opts.id;
@@ -79,8 +88,9 @@ export class Speaker {
     const args = cli === "claude"
       ? ["-p", "--verbose", "--model", model,
          "--input-format", "stream-json", "--output-format", "stream-json",
-         "--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-         "--system-prompt", SPEAKER_PROMPT, "--setting-sources", "",
+         ...(this.opts.tools ? ["--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_TOOLS, "--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"] : ["--tools", ""]),
+         "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+         "--system-prompt", this.opts.tools ? TOOLS_PROMPT : SPEAKER_PROMPT, "--setting-sources", "",
          ...(this.opts.thinking ? ["--effort", this.opts.thinking] : []),
          ...(session_id ? ["--resume", session_id] : [])]
       : ["app-server"];
@@ -119,6 +129,15 @@ export class Speaker {
     try { ev = JSON.parse(line); } catch { return; }
     if (this.opts.cli === "codex") return this.onCodex(ev);
     if (ev.session_id) this.session_id = ev.session_id;
+    // tool calls: remember the input by id, report when the result comes back
+    for (const b of ev.message?.content ?? []) {
+      if (ev.type === "assistant" && b?.type === "tool_use") this.toolCalls.set(b.id, { name: b.name, input: short(b.input) });
+      if (ev.type === "user" && b?.type === "tool_result") {
+        const call = this.toolCalls.get(b.tool_use_id); this.toolCalls.delete(b.tool_use_id);
+        const out = Array.isArray(b.content) ? b.content.map((p: any) => p.text ?? "").join("\n") : String(b.content ?? "");
+        if (call) this.opts.onTool?.({ ...call, output: out });
+      }
+    }
     if (ev.type !== "result") return;
     if (ev.is_error) return this.settle({ speaker: this.id, ok: false, error: String(ev.result ?? ev.subtype), raw: ev });
     const u = ev.usage ?? {};
@@ -169,7 +188,7 @@ export class Speaker {
       if (r?.data?.id) { this.session_id = r.data.id; this.resumed = true; return; }
     }
     const [providerID, ...rest] = this.opts.model.split("/");
-    const res = await this.ocFetch("POST", "/api/session", { title: `committee:${this.id}`, agent: "speaker", model: { providerID, id: rest.join("/"), ...(this.opts.thinking ? { variant: this.opts.thinking } : {}) } });
+    const res = await this.ocFetch("POST", "/api/session", { title: `committee:${this.id}`, agent: this.opts.tools ? "speaker-tools" : "speaker", model: { providerID, id: rest.join("/"), ...(this.opts.thinking ? { variant: this.opts.thinking } : {}) } });
     this.session_id = res?.data?.id;
     if (!this.session_id) throw new Error(`opencode session create failed: ${JSON.stringify(res).slice(0, 300)}`);
   }
@@ -184,11 +203,14 @@ export class Speaker {
     const t0 = sent.data.time?.created ?? Date.now();
     await this.ocFetch("POST", `/api/experimental/session/${this.session_id}/wait`);
     const list = await this.ocFetch("GET", `/api/session/${this.session_id}/message`);
-    const msg = (list?.data ?? []).find((m: any) => m.type === "assistant" && (m.time?.created ?? 0) >= t0);
-    if (!msg) return this.settle({ speaker: this.id, ok: false, error: `opencode: no assistant reply (${JSON.stringify(list).slice(0, 200)})`, raw: list });
-    const reply = (msg.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
-    const tk = msg.tokens ?? {};
-    this.settleJson(reply, msg, { fresh: (tk.input ?? 0) + (tk.cache?.write ?? 0), cached: tk.cache?.read ?? 0, out: (tk.output ?? 0) + (tk.reasoning ?? 0), cost: msg.cost });
+    // one assistant message per model step (a tool round is a step): oldest first, text from the last, usage summed
+    const steps = (list?.data ?? []).filter((m: any) => m.type === "assistant" && (m.time?.created ?? 0) >= t0).reverse();
+    if (!steps.length) return this.settle({ speaker: this.id, ok: false, error: `opencode: no assistant reply (${JSON.stringify(list).slice(0, 200)})`, raw: list });
+    for (const m of steps) for (const p of m.content ?? []) if (p.type === "tool") this.opts.onTool?.({ name: p.name, input: short(p.state?.input), output: (p.state?.content ?? []).map((x: any) => x.text ?? "").join("\n") || String(p.state?.error ?? "") });
+    const last = steps[steps.length - 1];
+    const reply = (last.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
+    const u = steps.reduce((a: any, m: any) => { const tk = m.tokens ?? {}; return { fresh: a.fresh + (tk.input ?? 0) + (tk.cache?.write ?? 0), cached: a.cached + (tk.cache?.read ?? 0), out: a.out + (tk.output ?? 0) + (tk.reasoning ?? 0), cost: a.cost + (m.cost ?? 0) }; }, { fresh: 0, cached: 0, out: 0, cost: 0 });
+    this.settleJson(reply, last, u);
   }
 
   // ---------- common
@@ -261,7 +283,10 @@ function opencodeServer(cwd: string) {
   ocServer = (async () => {
     const port = 41000 + Math.floor(Math.random() * 9000);
     const pw = randomBytes(12).toString("hex");
-    const config = JSON.stringify({ agent: { speaker: { description: "committee speaker", mode: "primary", permission: { "*": "deny" }, prompt: SPEAKER_PROMPT } } });
+    const config = JSON.stringify({ agent: {
+      speaker: { description: "committee speaker", mode: "primary", permission: { "*": "deny" }, prompt: SPEAKER_PROMPT },
+      "speaker-tools": { description: "committee speaker with read-only tools", mode: "primary", permission: OC_TOOLS_PERMISSION, prompt: TOOLS_PROMPT },
+    } });
     const proc = spawn("opencode", ["serve", "--port", String(port)], { cwd, env: { ...process.env, OPENCODE_SERVER_PASSWORD: pw, OPENCODE_CONFIG_CONTENT: config }, stdio: ["ignore", "ignore", "pipe"] });
     let err = ""; proc.stderr!.on("data", (d) => (err += d));
     process.on("exit", () => proc.kill());

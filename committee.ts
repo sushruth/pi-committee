@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { Speaker, type Cli, type TurnResult } from "./speaker.ts";
+import { Speaker, type Cli, type ToolUse, type TurnResult } from "./speaker.ts";
 import intentionSchema from "./schemas/intention.schema.json";
 import responseSchema from "./schemas/response.schema.json";
 
@@ -28,14 +28,15 @@ interface Config {
   etiquette: string;
   timeoutSeconds?: number;
 }
-interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona?: string }
+interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona?: string; tools?: boolean }
 // a seat that left the room; its lines stay in the transcript, it stays visible as a pale dot
 interface Ghost { id: string; cli: Cli; model: string; thinking?: string; left: string }
-type Kind = "human" | "speak" | "error" | "intention" | "usage";
+type Kind = "human" | "speak" | "error" | "intention" | "usage" | "tool";
 interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown }
 interface Stat { state: string; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; lastReply?: string }
-interface Saved { cli: Cli; model: string; thinking?: string; session_id?: string; sent: number; rules?: string }
-const PUBLIC: Kind[] = ["human", "speak", "error"];
+interface Saved { cli: Cli; model: string; thinking?: string; tools?: boolean; session_id?: string; sent: number; rules?: string }
+const PUBLIC: Kind[] = ["human", "speak", "error", "tool"];
+const TOOL_OUTPUT_CAP = 1500;
 
 export default function (pi: ExtensionAPI) {
   const cwd = process.cwd();
@@ -53,10 +54,10 @@ export default function (pi: ExtensionAPI) {
   const saved: Record<string, Saved> = existsSync(sessPath) ? JSON.parse(readFileSync(sessPath, "utf8")) : {};
   const makeSeat = (meta: Seat) => {
     const prev = saved[meta.id];
-    const match = prev && prev.cli === meta.cli && prev.model === meta.model && (prev.thinking ?? "") === (meta.thinking ?? "");
+    const match = prev && prev.cli === meta.cli && prev.model === meta.model && (prev.thinking ?? "") === (meta.thinking ?? "") && !!prev.tools === !!meta.tools;
     return {
       meta,
-      session: new Speaker({ id: meta.id, cli: meta.cli, model: meta.model, thinking: meta.thinking, cwd, session_id: match ? prev.session_id : undefined }),
+      session: new Speaker({ id: meta.id, cli: meta.cli, model: meta.model, thinking: meta.thinking, cwd, session_id: match ? prev.session_id : undefined, tools: meta.tools, onTool: (t) => onTool(meta.id, t) }),
       sent: match ? prev.sent : 0,
       rulesSeen: match ? prev.rules : undefined,
       stat: { state: "idle", fresh: 0, cached: 0, out: 0, cost: 0, calls: 0, turns: 0, lastSpoke: 0 } as Stat,
@@ -80,7 +81,7 @@ export default function (pi: ExtensionAPI) {
   let busy = false;
   const saveSessions = () => {
     const out: Record<string, Saved> = {};
-    for (const s of speakers) out[s.meta.id] = { cli: s.meta.cli, model: s.meta.model, thinking: s.meta.thinking, session_id: s.session.session_id, sent: s.sent, rules: s.rulesSeen };
+    for (const s of speakers) out[s.meta.id] = { cli: s.meta.cli, model: s.meta.model, thinking: s.meta.thinking, tools: s.meta.tools, session_id: s.session.session_id, sent: s.sent, rules: s.rulesSeen };
     writeFileSync(sessPath, JSON.stringify(out, null, 2));
   };
 
@@ -109,6 +110,12 @@ export default function (pi: ExtensionAPI) {
     if (PUBLIC.includes(ev.kind)) pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
     return ev;
   };
+  // a seat's tool call and result become one public event so the whole room sees it once
+  const onTool = (id: string, t: ToolUse) => {
+    const cut = t.output.length - TOOL_OUTPUT_CAP;
+    const out = cut > 0 ? t.output.slice(0, TOOL_OUTPUT_CAP) + `\n… (${cut} more characters; ${id} saw them all)` : t.output;
+    publish({ author: id, kind: "tool", text: `${t.name} ${t.input}\n${out}`.trim(), data: { tool: t.name } });
+  };
   const diag = (r: TurnResult, phase: string) => appendFileSync(diagPath, JSON.stringify({ ts: Date.now(), phase, speaker: r.speaker, error: r.error, raw: r.raw }) + "\n");
   if (existsSync(logPath)) {
     let c = 0;
@@ -134,7 +141,7 @@ export default function (pi: ExtensionAPI) {
   const col = (t: string, w: number, right = false) => { const p = " ".repeat(Math.max(0, w - visibleWidth(t))); return right ? p + t : t + p; };
   let openSeat: string | null = null;
   let widgetTui: { requestRender(): void } | undefined;
-  const seatMeta = (s: Seat) => `${s.cli}:${s.model.split("/").pop()}${s.thinking ? " #" + s.thinking : ""}`;
+  const seatMeta = (s: Seat) => `${s.cli}:${s.model.split("/").pop()}${s.thinking ? " #" + s.thinking : ""}${s.tools ? " ⚙" : ""}`;
   const SEP = ` ${ansi(240, "·")} `;
   const GAP = 3; // visible width of SEP
   const ABOUT = "(⚒)"; // openSeat value when the logo panel is open
@@ -294,7 +301,7 @@ export default function (pi: ExtensionAPI) {
   };
   const seatsPath = join(cwd, "committee.json");
   const saveSeats = () => { cfg.speakers = speakers.map((s) => s.meta); cfg.former = former; writeFileSync(seatsPath, JSON.stringify(cfg, null, 2) + "\n"); saveSessions(); refresh(); };
-  const seatLine = (s: Seat) => `${s.id}: ${s.cli} ${s.model}${s.thinking ? ` #${s.thinking}` : ""}`;
+  const seatLine = (s: Seat) => `${s.id}: ${s.cli} ${s.model}${s.thinking ? ` #${s.thinking}` : ""}${s.tools ? " ⚙" : ""}`;
   let active = speakers.length > 0;
   let footerFactory: Parameters<ExtensionContext["ui"]["setFooter"]>[0] | undefined;
   const applyMode = (ctx: ExtensionContext) => {
@@ -318,7 +325,7 @@ export default function (pi: ExtensionAPI) {
   const ADJECTIVES = ["excellent", "exhausted", "curious", "stubborn", "cheerful", "skeptical", "patient", "restless", "precise", "hungry", "sleepy", "fearless", "honest", "nervous", "tidy", "grumpy"];
   const randomName = () => { const p = (a: string[]) => a[Math.floor(Math.random() * a.length)]; let n = `${p(ADVERBS)}-${p(ADJECTIVES)}`; while (byId(n)) n = `${p(ADVERBS)}-${p(ADJECTIVES)}`; return n; };
   const cliLabel = (cli: Cli) => SUPPORTED.includes(cli) ? `${cli}  ${ansi(244, CLI_NOTE[cli])}` : ansi(240, `${cli}  ${CLI_NOTE[cli]}`);
-  const pickEngine = async (ctx: ExtensionContext, clis: Cli[]): Promise<Pick<Seat, "cli" | "model" | "thinking"> | undefined> => {
+  const pickEngine = async (ctx: ExtensionContext, clis: Cli[]): Promise<Pick<Seat, "cli" | "model" | "thinking" | "tools"> | undefined> => {
     const pick = await ctx.ui.select("Which CLI runs this seat?", clis.map(cliLabel));
     if (!pick) return;
     const cli = clis[clis.map(cliLabel).indexOf(pick)];
@@ -326,7 +333,9 @@ export default function (pi: ExtensionAPI) {
     const model = await pickModel(ctx, cli);
     if (!model) return;
     const thinking = (await pickThinking(ctx, cli)) || undefined;
-    return { cli, model, thinking };
+    const t = await ctx.ui.select("Tools for this seat?", ["none", "read-only (read, grep, glob, shell)"]);
+    if (t === undefined) return;
+    return { cli, model, thinking, tools: t !== "none" || undefined };
   };
   const addSeatFlow = async (ctx: ExtensionContext): Promise<boolean> => {
     const engine = await pickEngine(ctx, await installed());
@@ -398,8 +407,13 @@ export default function (pi: ExtensionAPI) {
       if (!pick) return;
       if (pick === "+ add a seat") { await addSeatFlow(ctx); return; }
       const s = speakers.find((x) => seatLine(x.meta) === pick)!;
-      const action = await ctx.ui.select(`Seat ${s.meta.id}`, ["change model", "change thinking", "remove seat"]);
+      const action = await ctx.ui.select(`Seat ${s.meta.id}`, ["change model", "change thinking", s.meta.tools ? "take tools away" : "give read-only tools", "remove seat"]);
       if (!action) return;
+      if (action.includes("tools")) {
+        const meta: Seat = { ...s.meta, tools: !s.meta.tools || undefined };
+        s.session.close(); Object.assign(s, makeSeat(meta)); saveSeats();
+        return ctx.ui.notify(`${s.meta.id} ${meta.tools ? "has read-only tools" : "has no tools"} (fresh session)`, "info");
+      }
       if (action === "remove seat") {
         retire(s); saveSeats();
         return ctx.ui.notify(`removed ${s.meta.id}; its past lines stay in the transcript`, "info");
@@ -417,16 +431,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerMessageRenderer("committee", (message, { outputPad }, theme) => {
     const d = message.details as Event;
-    const color = d.kind === "human" ? 250 : d.kind === "error" ? 196 : colorOf(d.author);
+    const color = d.kind === "human" ? 250 : d.kind === "error" ? 196 : d.kind === "tool" ? 244 : colorOf(d.author);
     const rep = (d.data as any)?.repeat;
-    const name = d.kind === "human" ? theme.fg("accent", d.author) : ansi(color, d.author + (d.kind === "error" ? " ✗" : rep ? ` ↺ already answered (${rep})` : ""));
+    const name = d.kind === "human" ? theme.fg("accent", d.author) : ansi(d.kind === "tool" ? colorOf(d.author) : color, d.author + (d.kind === "error" ? " ✗" : d.kind === "tool" ? " ⚙ " + (d.data as any)?.tool : rep ? ` ↺ already answered (${rep})` : ""));
     return {
       invalidate() {},
       render(width: number) {
         const pad = " ".repeat(outputPad);
         const bar = ansi(color, "▏");
-        const body = wrapTextWithAnsi(message.content, Math.max(20, width - outputPad - 2));
-        const seat = d.kind === "human" ? undefined : byId(d.author)?.meta ?? ghostOf(d.author);
+        const body = wrapTextWithAnsi(d.kind === "tool" ? ansi(244, message.content) : message.content, Math.max(20, width - outputPad - 2));
+        const seat = d.kind === "human" || d.kind === "tool" ? undefined : byId(d.author)?.meta ?? ghostOf(d.author);
         const who = seat ? [`${pad}${bar}${ansi(244, seatMeta(seat))}`] : [];
         return [`${pad}${bar}${name}`, ...who, ...body.map((l) => `${pad}${bar}${l}`)];
       },
@@ -434,20 +448,22 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---- packets: preamble + rules + full transcript once per session, then only the delta
-  const roster = () => speakers.map(({ meta: s }) => { const p = personaOf(s); return `- ${s.id} (${s.cli} ${s.model})${p ? `: ${p}` : ""}`; }).join("\n")
+  const roster = () => speakers.map(({ meta: s }) => { const p = personaOf(s); return `- ${s.id} (${s.cli} ${s.model}${s.tools ? ", has read-only tools" : ""})${p ? `: ${p}` : ""}`; }).join("\n")
     + (former.length ? `\nFormer, no longer in the room (do not address them): ${former.map((g) => `${g.id} (left after ${g.left})`).join(", ")}` : "");
   const ledger = () => speakers.map((s) => `${s.meta.id} ${s.stat.turns}x${s.stat.lastSpoke ? `@c${s.stat.lastSpoke}` : ""}`).join(", ") + `; floor: ${floorHolder ?? "nobody"}`;
   const rules = `Floor rules (self-governed, nobody schedules turns): normally one speaker per cycle. Speak only when you add something the others' intentions do not cover. Defer to speakers who have spoken less. Whoever last held the floor may keep it to finish a thought. If several speak at once, fine; do not re-litigate, just be brief. Only what appears in the transcript was said; never cite an intention as if it were spoken. Contributions are at most 120 words unless your intention said length "long". If you ever have tools, keep their output short: ask for the smallest result that answers the question, since everything you bring back is read by the whole room.
 A human message never goes unanswered: if nobody has anything new to add, whoever answered the human most recently responds with action "repeat" and the event id of that earlier reply in ref, so it is shown again instead of silence.
+Tools: some seats have read-only tools (read files, grep, glob, a shell for inspection) in the room folder. If your turn needs a lookup, say what you would run in the intention's "tool" field, one line. Run tools only in the respond phase when you actually speak; if another seat's intention names the same lookup and it has spoken less, leave it to them. Lines marked ⚙ in the transcript are tool calls and results already made: reuse them, never repeat them. Never create, change or delete anything.
 Two phases, always as JSON: "intention" (do you have something to add; topic is one sentence under 20 words), then "respond" (you see everyone's intentions and either hold, with action wait or silent, respond, with action speak and the contribution in text, or re-show an earlier reply of yours, with action repeat and its event id in ref).`;
   const rulesText = () => `Etiquette: ${cfg.etiquette}\n${rules}`;
   const rulesVersion = () => createHash("sha1").update(rulesText()).digest("hex").slice(0, 8);
-  const line = (e: Event) => `[${e.id} ${e.author}] ${e.text}`;
+  const line = (e: Event) => `[${e.id} ${e.author}${e.kind === "tool" ? " ⚙" : ""}] ${e.text}`;
   const lastLedger = new Map<string, string>();
   const packet = (s: (typeof speakers)[number], phase: string, extra: string) => {
     const me = s.meta;
     const pub = events.filter((e) => PUBLIC.includes(e.kind));
-    const fresh = pub.slice(s.sent);
+    // a seat's own tool events are already in its session; the others' are new to it
+    const fresh = pub.slice(s.sent).filter((e) => !(e.kind === "tool" && e.author === me.id));
     const first = s.sent === 0;
     s.sent = pub.length;
     const l = ledger();
@@ -457,7 +473,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     const rulesBlock = first ? `${rulesText()}\n` : s.rulesSeen !== v ? `The room's rules changed; this replaces what you had:\n${rulesText()}\n\n` : "";
     s.rulesSeen = v;
     const head = first
-      ? `You are "${me.id}" (${me.cli} ${me.model}) in a committee conversation with humans and other models.${personaOf(me) ? ` Persona: ${personaOf(me)}` : " Speak as yourself; no assigned role."}\n${rulesBlock}Roster:\n${roster()}\n\nTranscript so far:\n${fresh.map(line).join("\n") || "(empty)"}\n\n`
+      ? `You are "${me.id}" (${me.cli} ${me.model}) in a committee conversation with humans and other models.${personaOf(me) ? ` Persona: ${personaOf(me)}` : " Speak as yourself; no assigned role."}${me.tools ? ` You have read-only tools; the room folder is ${cwd}.` : " You have no tools."}\n${rulesBlock}Roster:\n${roster()}\n\nTranscript so far:\n${fresh.map(line).join("\n") || "(empty)"}\n\n`
       : `${rulesBlock}${fresh.length ? `New in the transcript:\n${fresh.map(line).join("\n")}\n\n` : ""}`;
     return `${head}${ledgerLine}${extra}Phase: ${phase}.`;
   };
@@ -495,7 +511,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (candidates.length === 1) {
       const s = candidates[0];
       setState(s.meta.id, "speaking");
-      const r = await s.session.send(packet(s, "respond", "Nobody else wants to speak this cycle; you have the floor. Put the contribution in text with action \"speak\".\n"), responseSchema, timeoutMs);
+      const r = await s.session.send(packet(s, "respond", `Nobody else wants to speak this cycle; you have the floor.${s.meta.tools ? " Use your tools now if your intention needed a lookup." : ""} Put the contribution in text with action "speak".\n`), responseSchema, timeoutMs);
       account(r, "respond"); saveSessions();
       return takeReply(r);
     }
@@ -503,7 +519,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     for (const s of candidates) setState(s.meta.id, "deciding");
     let spoke = 0;
     await Promise.all(candidates.map((s) =>
-      s.session.send(packet(s, "respond", `Everyone's intentions:\n${summary}\nHold (action wait or silent, empty text) or respond now (action speak, contribution in text).\n`), responseSchema, timeoutMs)
+      s.session.send(packet(s, "respond", `Everyone's intentions:\n${summary}\nHold (action wait or silent, empty text) or respond now (action speak, contribution in text).${s.meta.tools ? " If you respond and your intention needed a lookup, use your tools first." : ""}\n`), responseSchema, timeoutMs)
         .then((r) => { account(r, "respond"); spoke += takeReply(r); })));
     saveSessions();
     return spoke;

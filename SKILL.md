@@ -40,6 +40,14 @@ If exactly one seat wants to speak it is asked directly, without the intentions 
 
 Rules every seat gets (see `rules` in committee.ts): one speaker per cycle normally, defer to who has spoken less, the last floor holder may finish a thought, ties mean everyone who claimed speaks briefly, contributions under 120 words unless the intention said long, tool output kept short if a seat ever has tools, a human message never goes unanswered (the last answerer repeats), never cite an intention as if spoken. Rules are versioned; a session that saw an older version gets the new text once.
 
+## Tools, per seat, read-only
+
+A seat with `tools: true` (onboarding asks; `/seats` toggles, which gives a fresh session) runs its CLI's own tools: claude with `--tools Read,Grep,Glob,Bash` and Edit/Write disallowed, opencode with a `speaker-tools` agent that allows read, grep, glob, list and bash. The room folder is their working directory. The rules say read-only; nothing enforces it beyond the claude disallow list.
+
+Every tool call and its result become one public `tool` event (output capped at 1500 characters, the cap stated), rendered dim with ⚙, written to the ledger so every other seat sees it on its next packet and does not repeat it. The seat's own tool events are skipped in its delta, since its session already has them. In the intention phase a seat says what it would look up in `tool`; it runs it only when it actually responds, and leaves it to a seat that has spoken less if their intention names the same lookup.
+
+Cost: a tool round is an extra model step in that seat's session (measured: a glob plus answer on glm was ~90 fresh tokens after the first call; claude's first tool call carried ~8k fresh because the tool schemas joined its prompt), and the capped result is fresh text once for every other seat.
+
 ## Sessions and cost
 
 One native session per seat, kept open for the whole conversation. A session gets the preamble (identity, rules, roster) and the full transcript once, then only the events since its last packet. The CLI's own context and the provider's prompt cache hold the rest. Every call reads its whole session, so input tokens per call equal the session size; what matters is the fresh part.
@@ -48,7 +56,7 @@ Measured on 2026-10-21, fresh tokens per call after the first:
 
 | cli | how | fresh per call | notes |
 | --- | --- | --- | --- |
-| claude | `claude -p` stream-json, `--system-prompt`, `--setting-sources ""`, `--tools ""`, resumed with `--resume` | ~150-300 | without the two prompt flags it carries 10k of Claude Code prompt per call |
+| claude | `claude -p` stream-json, `--system-prompt`, `--setting-sources ""`, `--tools ""` (or the read-only four) , resumed with `--resume` | ~150-300 | without the two prompt flags it carries 10k of Claude Code prompt per call |
 | opencode | one `opencode serve` per host, one session per seat over HTTP, tool-less `speaker` agent via `OPENCODE_CONFIG_CONTENT` | ~60-150 | any provider opencode is logged into. OpenRouter and DeepSeek direct cache-hit; Fireworks did not |
 | codex | `codex app-server` JSON-RPC, private `CODEX_HOME` | ~200 after turn 2 | fixed ~27k context of its own prompt and tools, cached, no flag removes it |
 | cursor | one `cursor-agent -p --trust` process per message, `--resume` | ~100 | fixed ~11k of its own prompt, cached, no flag removes it |
@@ -65,7 +73,7 @@ Every call appends a `usage` event: phase, fresh, cached, out, cost when the pro
 
 - `committee.ts`: the extension. Config, replay, packets, cycle, rendering, `/seats`, `/committee`, `/usage`, onboarding.
 - `speaker.ts`: `Speaker` class, one per seat. `send(text, schema)` returns `{ok, payload, usage, session_id, resumed}`. Schema goes in the prompt and the reply is parsed and checked locally, so one session serves both phases.
-- `schemas/`: intention and response JSON schemas.
+- `schemas/`: intention (with the optional `tool` line) and response JSON schemas.
 - `example.json`: a reference cast. Not loaded; onboarding writes the real one.
 - `smoke.ts`: `bun smoke.ts` from a room folder runs every seat in example.json for two turns, then kills and resumes each session.
 
@@ -74,5 +82,4 @@ Every call appends a `usage` event: phase, fresh, cached, out, cost when the pro
 - A new rule or etiquette line: edit `rules` or the etiquette in committee.json. Versioning delivers it to live sessions on their next packet.
 - A new CLI or provider: add a case in speaker.ts with the same three jobs as the others: start or resume a session, send one message and parse the reply, report fresh/cached/out. Measure its fixed per-call context before recommending it.
 - Changing a seat's model or thinking gives it a fresh session; its past lines stay in the transcript and the ledger. Removing a seat keeps its lines too. Adding a seat is not announced to the others; they see its lines appear.
-- Seats have no tools today (claude `--tools ""`, opencode `permission deny`). If native tools are turned on per seat, the host should publish each tool call and result as a ledger event so the room sees it once; the intention phase then also declares planned tool use so overlaps resolve like speaking does. Not built.
 - Not built, by choice: nomination rounds, a soft deadline for slow seats, a facilitator, a cap on LLM-to-LLM cycles.
