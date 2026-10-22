@@ -50,7 +50,7 @@
       "intent": "contribute",
       "topic": "one sentence under 20 words on what you would add",
       "length": "short",
-      "tool": "only if you have tools and need a lookup: what you would run"
+      "tool": "only if you have tools: the work you would do for this turn, one line"
     }
   ]
 }

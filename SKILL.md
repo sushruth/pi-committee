@@ -44,9 +44,9 @@ Rules every seat gets (see `rules` in committee.ts): one speaker per cycle norma
 
 A seat's `tools` is `"read"` or `"all"` (onboarding asks; `/seats` changes it, which gives a fresh session). Read-only: claude with `--tools Read,Grep,Glob,Bash` and Edit/Write disallowed, opencode with a `speaker-tools` agent allowing read, grep, glob, list and bash. All: claude with `--permission-mode bypassPermissions` and its full tool set, opencode with a `speaker-all` agent allowing everything. The room folder is their working directory. With "all" the only guard is the rule: plan and report unless the human asked for changes.
 
-Every tool call and its result become one public `tool` event (output capped at 1500 characters, the cap stated), rendered dim with ⚙, written to the ledger so every other seat sees it on its next packet and does not repeat it. The seat's own tool events are skipped in its delta, since its session already has them. The rules tell seats with tools to orient themselves first (list the room folder, read a README or AGENTS file, find what the question is about) and report what they found in a line, to measure before proposing, and to split lookups between seats. So a human prompt needs no path or layout hints. In the intention phase a seat says what it would look up in `tool`; it runs it only when it actually responds, and leaves it to a seat that has spoken less if their intention names the same lookup.
+Tool work is private to the seat: its calls and their output stay in its own session, the room sees only the reply, and the reply line carries a dim marker (⚙ N tool calls, M chars, kept in its session) for the human. The rules therefore tell seats to put what they found or did into the reply with numbers, paths and results, and to divide work through the intention's `tool` line (one line on the work they would do; a seat that has spoken less and named the same work gets it). Seats with tools get a longer per-call budget: `toolTimeoutSeconds` in committee.json, default 600, against 120 for the rest.
 
-Cost: a tool round is an extra model step in that seat's session (measured: a glob plus answer on glm was ~90 fresh tokens after the first call; claude's first tool call carried ~8k fresh because the tool schemas joined its prompt), and the capped result is fresh text once for every other seat.
+Cost: a tool round is an extra model step in that seat's session only (measured: a glob plus answer on glm was ~90 fresh tokens after the first call; claude's first tool call carried ~8k fresh because the tool schemas joined its prompt). On opencode, "all" also exposes the user's MCP servers through its code-mode tool, and one seat spent ~96k fresh tokens reading that catalogue; keep opencode seats on read-only unless they need to write.
 
 ## Sessions and cost
 
@@ -60,10 +60,11 @@ Measured on 2026-10-21, fresh tokens per call after the first:
 | opencode | one `opencode serve` per host, one session per seat over HTTP, tool-less `speaker` agent via `OPENCODE_CONFIG_CONTENT` | ~60-150 | any provider opencode is logged into. OpenRouter and DeepSeek direct cache-hit; Fireworks did not |
 | codex | `codex app-server` JSON-RPC, private `CODEX_HOME` | ~200 after turn 2 | fixed ~27k context of its own prompt and tools, cached, no flag removes it |
 | cursor | one `cursor-agent -p --trust` process per message, `--resume` | ~100 | fixed ~11k of its own prompt, cached, no flag removes it |
+| pi | one `pi -p --mode json` process per message, `--session-id` under `committee/pi-sessions`, `--system-prompt` replaces its own | ~1.6k (glm-flash via openrouter, no cache hits reported) | any provider pi is logged into; tools via `--no-tools`, `--tools read,grep,find,ls,bash`, or pi's default set |
 
-Onboarding marks codex and cursor as not supported for that reason. The adapters work; the cost does not.
+Onboarding marks codex and cursor as not supported for that reason; claude, opencode and pi are offered. The adapters work; the cost does not.
 
-Thinking levels are per seat. claude: `--effort` low to max. codex: per-turn `effort`. opencode: the model variant; the picker reads the live list from opencode's /api/model, since names differ per model (glm-5.3 and glm-5.3-flash low/high/max, qwen3.8-flash none/high/max, deepseek-flash and -v4-pro none/low/high/max). A seat whose variant the model lacks fails every call with provider.no-route. cursor: a suffix in the model id.
+Thinking levels are per seat. claude: `--effort` low to max. pi: `--thinking` off to max. codex: per-turn `effort`. opencode: the model variant; the picker reads the live list from opencode's /api/model, since names differ per model (glm-5.3 and glm-5.3-flash low/high/max, qwen3.8-flash none/high/max, deepseek-flash and -v4-pro none/low/high/max). A seat whose variant the model lacks fails every call with provider.no-route. cursor: a suffix in the model id.
 
 ## Usage is logged, never estimated
 

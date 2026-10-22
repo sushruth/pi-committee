@@ -11,14 +11,15 @@
 // cursor:   no stream mode: one `cursor-agent -p --trust` process per message, --resume <id>.
 // opencode: one shared `opencode serve` per host, one session per speaker over HTTP
 //           (any provider opencode is logged into); a tool-less "speaker" agent is passed inline.
+// pi:       one `pi -p --mode json` process per message, --session-id resumes; its own system prompt is replaced.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
-export type Cli = "claude" | "codex" | "cursor" | "opencode";
+export type Cli = "claude" | "codex" | "cursor" | "opencode" | "pi";
 
 export interface SpeakerOpts {
   id: string;
@@ -29,11 +30,10 @@ export interface SpeakerOpts {
   thinking?: string;
   /** native session id from a previous run; the adapter resumes it, or starts fresh if that fails */
   session_id?: string;
-  /** "read": read, grep, glob, shell for inspection; "all": everything the CLI has, writes included; every call and result is reported through onTool */
+  /** "read": read, grep, glob, shell for inspection; "all": everything the CLI has, writes included. Tool work stays in the seat's session; the result only counts it */
   tools?: Tools;
-  onTool?: (t: ToolUse) => void;
 }
-export interface ToolUse { name: string; input: string; output: string }
+export interface ToolWork { calls: number; chars: number }
 export type Tools = "read" | "all";
 
 export interface Usage { fresh: number; cached: number; out: number; cost?: number }
@@ -47,6 +47,8 @@ export interface TurnResult {
   payload?: unknown;
   error?: string;
   usage?: Usage;
+  /** how much tool work the seat did for this reply; the room never sees the calls themselves */
+  tools?: ToolWork;
   raw?: unknown;
 }
 
@@ -56,7 +58,7 @@ const ALL_PROMPT = "You are one participant in a text conversation among humans 
 const CLAUDE_TOOLS = "Read,Grep,Glob,Bash";
 const promptFor = (t?: Tools) => t === "all" ? ALL_PROMPT : t === "read" ? TOOLS_PROMPT : SPEAKER_PROMPT;
 const OC_TOOLS_PERMISSION = { "*": "deny", read: "allow", grep: "allow", glob: "allow", list: "allow", bash: "allow" };
-const short = (v: unknown, n = 300) => { const s = typeof v === "string" ? v : JSON.stringify(v); return s.length > n ? s.slice(0, n) + "…" : s; };
+const PI_READ_TOOLS = "read,grep,find,ls,bash";
 
 export class Speaker {
   readonly id: string;
@@ -73,13 +75,14 @@ export class Speaker {
   private schema: object = {};
   private ready: Promise<void> = Promise.resolve();
   private oc?: { base: string; auth: string };
-  private toolCalls = new Map<string, { name: string; input: string }>();
+  private work: ToolWork = { calls: 0, chars: 0 };
   private nudged = false;
+  private didTool(output: unknown) { this.work.calls++; this.work.chars += (typeof output === "string" ? output : JSON.stringify(output ?? "")).length; }
 
   constructor(private opts: SpeakerOpts) {
     this.id = opts.id;
     this.session_id = opts.session_id;
-    if (opts.cli === "cursor") { this.resumed = !!opts.session_id; return; }
+    if (opts.cli === "cursor" || opts.cli === "pi") { this.resumed = !!opts.session_id; if (opts.cli === "pi") this.session_id ??= randomUUID(); return; }
     if (opts.cli === "opencode") { this.ready = this.opencodeInit(); return; }
     this.proc = this.spawnLongLived();
     if (opts.cli === "codex") this.ready = this.codexInit();
@@ -135,15 +138,7 @@ export class Speaker {
     try { ev = JSON.parse(line); } catch { return; }
     if (this.opts.cli === "codex") return this.onCodex(ev);
     if (ev.session_id) this.session_id = ev.session_id;
-    // tool calls: remember the input by id, report when the result comes back
-    for (const b of ev.message?.content ?? []) {
-      if (ev.type === "assistant" && b?.type === "tool_use") this.toolCalls.set(b.id, { name: b.name, input: short(b.input) });
-      if (ev.type === "user" && b?.type === "tool_result") {
-        const call = this.toolCalls.get(b.tool_use_id); this.toolCalls.delete(b.tool_use_id);
-        const out = Array.isArray(b.content) ? b.content.map((p: any) => p.text ?? "").join("\n") : String(b.content ?? "");
-        if (call) this.opts.onTool?.({ ...call, output: out });
-      }
-    }
+    if (ev.type === "user") for (const b of ev.message?.content ?? []) if (b?.type === "tool_result") this.didTool(Array.isArray(b.content) ? b.content.map((p: any) => p.text ?? "").join("\n") : b.content);
     if (ev.type !== "result") return;
     if (ev.is_error) return this.settle({ speaker: this.id, ok: false, error: String(ev.result ?? ev.subtype), raw: ev });
     const u = ev.usage ?? {};
@@ -186,6 +181,31 @@ export class Speaker {
     return proc;
   }
 
+  // ---------- pi: one process per message, session file under the room folder
+  private piOneShot(text: string): ChildProcess {
+    const { model, cwd, thinking, tools } = this.opts;
+    const args = ["-p", "--mode", "json", "--no-extensions", "--no-mcp", "--no-skills", "--no-context-files", "--no-prompt-templates",
+      "--session-dir", join(cwd ?? process.cwd(), "committee", "pi-sessions"), "--session-id", this.session_id!,
+      "--system-prompt", promptFor(tools), "--model", model,
+      ...(thinking ? ["--thinking", thinking] : []),
+      ...(tools === "all" ? [] : tools === "read" ? ["--tools", PI_READ_TOOLS] : ["--no-tools"])];
+    const proc = spawn("pi", [...args, text], { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let err = "", last: any;
+    proc.stderr!.on("data", (d) => (err += d));
+    let buf = "";
+    proc.stdout!.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); let ev: any; try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.type === "tool_execution_end") this.didTool(ev.result?.content?.map?.((p: any) => p.text ?? "").join("") ?? ev.result);
+      if (ev.type === "turn_end") last = ev.message; } });
+    proc.on("exit", (code) => {
+      if (!last) return this.settle({ speaker: this.id, ok: false, error: `pi exit ${code}: ${err.slice(-300)}` });
+      if (last.stopReason === "error") return this.settle({ speaker: this.id, ok: false, error: String(last.errorMessage ?? "error").slice(0, 300), raw: last });
+      const u = last.usage ?? {};
+      this.settleJson((last.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join(""), last, { fresh: (u.input ?? 0) + (u.cacheWrite ?? 0), cached: u.cacheRead ?? 0, out: u.output ?? 0, cost: u.cost?.total });
+      this.resumed = true;
+    });
+    return proc;
+  }
+
   // ---------- opencode: shared server, one session
   private async opencodeInit() {
     this.oc = await opencodeServer(this.opts.cwd ?? process.cwd());
@@ -212,7 +232,7 @@ export class Speaker {
     // one assistant message per model step (a tool round is a step): oldest first, text from the last, usage summed
     const steps = (list?.data ?? []).filter((m: any) => m.type === "assistant" && (m.time?.created ?? 0) >= t0).reverse();
     if (!steps.length) return this.settle({ speaker: this.id, ok: false, error: `opencode: no assistant reply (${JSON.stringify(list).slice(0, 200)})`, raw: list });
-    for (const m of steps) for (const p of m.content ?? []) if (p.type === "tool") this.opts.onTool?.({ name: p.name, input: short(p.state?.input), output: (p.state?.content ?? []).map((x: any) => x.text ?? "").join("\n") || String(p.state?.error ?? "") });
+    for (const m of steps) for (const p of m.content ?? []) if (p.type === "tool") this.didTool((p.state?.content ?? []).map((x: any) => x.text ?? "").join("\n") || p.state?.error);
     const last = steps[steps.length - 1];
     const reply = (last.content ?? []).filter((p: any) => p.type === "text").map((p: any) => p.text).join("");
     const u = steps.reduce((a: any, m: any) => { const tk = m.tokens ?? {}; return { fresh: a.fresh + (tk.input ?? 0) + (tk.cache?.write ?? 0), cached: a.cached + (tk.cache?.read ?? 0), out: a.out + (tk.output ?? 0) + (tk.reasoning ?? 0), cost: a.cost + (m.cost ?? 0) }; }, { fresh: 0, cached: 0, out: 0, cost: 0 });
@@ -224,6 +244,7 @@ export class Speaker {
     const payload = parseJson(text);
     // models that just used tools often answer in prose; ask once for the same content as JSON
     if (payload === undefined && !this.nudged && this.opts.cli !== "cursor") {
+      if (this.opts.cli === "pi") this.resumed = true;
       this.nudged = true;
       this.dispatch("Your previous reply was prose, not JSON, so the room did not see it. Send the same content again as the JSON object the host asked for (put the prose in the text field).");
       return;
@@ -231,7 +252,7 @@ export class Speaker {
     if (payload === undefined) return this.settle({ speaker: this.id, ok: false, error: `non-JSON reply: ${text.slice(0, 200)}`, usage, raw });
     const missing = ((this.schema as any).required ?? []).filter((k: string) => !(k in (payload as any)));
     if (missing.length) return this.settle({ speaker: this.id, ok: false, error: `reply missing ${missing.join(",")}: ${text.slice(0, 200)}`, usage, raw });
-    this.settle({ speaker: this.id, ok: true, session_id: this.session_id, resumed: this.resumed, payload, usage, raw });
+    this.settle({ speaker: this.id, ok: true, session_id: this.session_id, resumed: this.resumed, payload, usage, tools: this.work.calls ? this.work : undefined, raw });
   }
 
   private settle(r: TurnResult) {
@@ -248,7 +269,7 @@ export class Speaker {
     const ex = (schema as any).examples?.[0];
     const prompt = ex ? `${text}\n\nReply with only one JSON object shaped like this, no prose:\n${JSON.stringify(ex)}`
       : `${text}\n\nReply with only JSON matching this schema, no prose:\n${JSON.stringify(schema)}`;
-    this.nudged = false;
+    this.nudged = false; this.work = { calls: 0, chars: 0 };
     return new Promise((resolve) => {
       const t = setTimeout(() => { this.oneShot?.kill(); this.settle({ speaker: this.id, ok: false, error: `timeout ${timeoutMs}ms` }); }, timeoutMs);
       this.pending = (r) => { clearTimeout(t); resolve(r); };
@@ -259,6 +280,8 @@ export class Speaker {
   private dispatch(prompt: string) {
     if (this.opts.cli === "cursor") {
       this.oneShot = this.cursorOneShot(prompt);
+    } else if (this.opts.cli === "pi") {
+      this.oneShot = this.piOneShot(prompt);
     } else if (this.opts.cli === "opencode") {
       this.opencodeTurn(prompt);
     } else if (this.opts.cli === "codex") {
