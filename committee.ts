@@ -332,7 +332,18 @@ export default function (pi: ExtensionAPI) {
   };
   const ADVERBS = ["quietly", "simply", "boldly", "oddly", "nearly", "mostly", "barely", "wildly", "gently", "sharply", "plainly", "slowly", "briskly", "warmly", "coolly", "deeply"];
   const ADJECTIVES = ["excellent", "exhausted", "curious", "stubborn", "cheerful", "skeptical", "patient", "restless", "precise", "hungry", "sleepy", "fearless", "honest", "nervous", "tidy", "grumpy"];
-  const randomName = () => { const p = (a: string[]) => a[Math.floor(Math.random() * a.length)]; let n = `${p(ADVERBS)}-${p(ADJECTIVES)}`; while (byId(n)) n = `${p(ADVERBS)}-${p(ADJECTIVES)}`; return n; };
+  // a new name shares no word and no initials with any seat in the room, live or former, so the status row stays readable
+  const randomName = () => {
+    const p = (a: string[]) => a[Math.floor(Math.random() * a.length)];
+    const taken = [...speakers.map((s) => s.meta.id), ...former.map((g) => g.id)];
+    const words = new Set(taken.flatMap((id) => id.split("-")));
+    const inits = new Set(taken.map(initials));
+    for (let i = 0; i < 200; i++) {
+      const adv = p(ADVERBS), adj = p(ADJECTIVES), n = `${adv}-${adj}`;
+      if (!words.has(adv) && !words.has(adj) && !inits.has(initials(n))) return n;
+    }
+    return `${p(ADVERBS)}-${p(ADJECTIVES)}-${speakers.length + former.length + 1}`;
+  };
   const cliLabel = (cli: Cli) => SUPPORTED.includes(cli) ? `${cli}  ${ansi(244, CLI_NOTE[cli])}` : ansi(240, `${cli}  ${CLI_NOTE[cli]}`);
   const TOOL_CHOICES: [string, Tools | undefined][] = [["none", undefined], ["read-only: read, grep, glob, shell", "read"], ["everything the CLI has, writes included", "all"]];
   const pickTools = async (ctx: ExtensionContext, current?: Tools): Promise<Tools | undefined | null> => {
