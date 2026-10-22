@@ -12,7 +12,9 @@ Then in any folder, start `pi` and run `/committee on`. To try it without instal
 
 ```
 pi -e https://github.com/sushruth/pi-committee
-``` With no `committee.json` in the folder, onboarding asks for each seat's CLI, model, thinking level, name and optional persona.
+```
+
+With no `committee.json` in the folder, onboarding asks for each seat's CLI, model, thinking level, name and optional persona.
 
 - `committee.json` is the shareable part: seats, former seats, etiquette.
 - `committee/` holds the room's state: event log, native session ids, diagnostics.
