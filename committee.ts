@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { Speaker, type Cli, type ToolUse, type TurnResult } from "./speaker.ts";
+import { Speaker, opencodeVariants, type Cli, type ToolUse, type TurnResult } from "./speaker.ts";
 import intentionSchema from "./schemas/intention.schema.json";
 import responseSchema from "./schemas/response.schema.json";
 
@@ -79,6 +79,8 @@ export default function (pi: ExtensionAPI) {
     former.push({ id: s.meta.id, cli: s.meta.cli, model: s.meta.model, thinking: s.meta.thinking, left: last?.id ?? "event-0" });
   };
   let busy = false;
+  let paused = false;
+  let heldWhilePaused = false;
   const saveSessions = () => {
     const out: Record<string, Saved> = {};
     for (const s of speakers) out[s.meta.id] = { cli: s.meta.cli, model: s.meta.model, thinking: s.meta.thinking, tools: s.meta.tools, session_id: s.session.session_id, sent: s.sent, rules: s.rulesSeen };
@@ -293,8 +295,11 @@ export default function (pi: ExtensionAPI) {
   // effort ladders the CLIs accept; a model may reject some (the next call then shows an error)
   const DEFAULT = "(model default)";
   const thinkingFor = (cli: Cli) => cli === "claude" ? ["low", "medium", "high", "xhigh", "max"] : cli === "codex" ? ["minimal", "low", "medium", "high", "xhigh"] : cli === "opencode" ? ["none", "minimal", "low", "medium", "high", "xhigh", "max"] : [];
-  const pickThinking = async (ctx: ExtensionContext, cli: Cli, current?: string) => {
-    const list = thinkingFor(cli);
+  const pickThinking = async (ctx: ExtensionContext, cli: Cli, current?: string, model?: string) => {
+    // opencode variants differ per model; the live list beats the generic ladder
+    const list = cli === "opencode" && model ? (await opencodeVariants(cwd, model)).concat() : thinkingFor(cli);
+    if (cli === "opencode" && model && !list.length) ctx.ui.notify("opencode lists no variants for this model; the generic ladder is shown, the model may reject some", "warning");
+    if (cli === "opencode" && !list.length) list.push(...thinkingFor(cli));
     if (!list.length) { ctx.ui.notify("cursor sets thinking in the model id (e.g. glm-5.2-high)", "info"); return current; }
     const v = await ctx.ui.select(`Thinking (${cli})`, [current ?? DEFAULT, ...[DEFAULT, ...list].filter((x) => x !== (current ?? DEFAULT))]);
     return v === undefined ? undefined : v === DEFAULT ? "" : v;
@@ -332,7 +337,7 @@ export default function (pi: ExtensionAPI) {
     if (!SUPPORTED.includes(cli)) { ctx.ui.notify(`${cli} is not supported yet: ${CLI_NOTE[cli]}`, "warning"); return pickEngine(ctx, clis); }
     const model = await pickModel(ctx, cli);
     if (!model) return;
-    const thinking = (await pickThinking(ctx, cli)) || undefined;
+    const thinking = (await pickThinking(ctx, cli, undefined, model)) || undefined;
     const t = await ctx.ui.select("Tools for this seat?", ["none", "read-only (read, grep, glob, shell)"]);
     if (t === undefined) return;
     return { cli, model, thinking, tools: t !== "none" || undefined };
@@ -376,8 +381,17 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand("committee", {
-    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; reset = delete this folder's committee.json and committee/",
+    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; reset = delete this folder's committee.json and committee/",
     handler: async (args, ctx) => {
+      if (args.trim() === "pause") {
+        paused = true; ctx.ui.setStatus("committee", busy ? "pausing after this phase" : "paused");
+        return ctx.ui.notify(busy ? "pausing: calls in flight finish, then nothing new starts" : "paused: your messages are logged, nobody answers until /committee resume", "info");
+      }
+      if (args.trim() === "resume") {
+        paused = false; ctx.ui.setStatus("committee", "idle");
+        if (heldWhilePaused && !busy) { heldWhilePaused = false; await runCycles(ctx); }
+        return ctx.ui.notify("resumed", "info");
+      }
       if (args.trim() === "reset") {
         if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
         const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
@@ -419,7 +433,7 @@ export default function (pi: ExtensionAPI) {
         return ctx.ui.notify(`removed ${s.meta.id}; its past lines stay in the transcript`, "info");
       }
       const field = action === "change model" ? "model" : "thinking";
-      const v = field === "model" ? await pickModel(ctx, s.meta.cli, s.meta.model) : await pickThinking(ctx, s.meta.cli, s.meta.thinking);
+      const v = field === "model" ? await pickModel(ctx, s.meta.cli, s.meta.model) : await pickThinking(ctx, s.meta.cli, s.meta.thinking, s.meta.model);
       if (v === undefined) return;
       const meta: Seat = { ...s.meta, [field]: v || undefined };
       s.session.close();
@@ -530,15 +544,19 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (busy) { ctx.ui.notify("committee still settling, wait a moment", "warning"); return { action: "handled" }; }
     cycleNo++;
     publish({ author: "you", kind: "human", text: event.text });
+    if (paused) { heldWhilePaused = true; ctx.ui.notify("paused: logged, nobody answers until /committee resume", "warning"); return { action: "handled" }; }
+    await runCycles(ctx);
+    return { action: "handled" };
+  });
+  async function runCycles(ctx: ExtensionContext) {
     busy = true;
     try {
       let n = 0;
-      do { ctx.ui.setStatus("committee", `cycle ${++n}`); } while ((await cycle()) > 0);
-      ctx.ui.setStatus("committee", "idle");
+      do { ctx.ui.setStatus("committee", `cycle ${++n}`); } while (!paused && (await cycle()) > 0);
+      ctx.ui.setStatus("committee", paused ? "paused" : "idle");
       refresh();
     } finally { busy = false; }
-    return { action: "handled" };
-  });
+  }
 
   pi.on("session_shutdown", async () => { saveSessions(); for (const s of speakers) s.session.close(); });
 }

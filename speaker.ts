@@ -71,6 +71,7 @@ export class Speaker {
   private ready: Promise<void> = Promise.resolve();
   private oc?: { base: string; auth: string };
   private toolCalls = new Map<string, { name: string; input: string }>();
+  private nudged = false;
 
   constructor(private opts: SpeakerOpts) {
     this.id = opts.id;
@@ -216,6 +217,12 @@ export class Speaker {
   // ---------- common
   private settleJson(text: string, raw: unknown, usage?: Usage) {
     const payload = parseJson(text);
+    // models that just used tools often answer in prose; ask once for the same content as JSON
+    if (payload === undefined && !this.nudged && this.opts.cli !== "cursor") {
+      this.nudged = true;
+      this.dispatch("Your previous reply was prose, not JSON, so the room did not see it. Send the same content again as the JSON object the host asked for (put the prose in the text field).");
+      return;
+    }
     if (payload === undefined) return this.settle({ speaker: this.id, ok: false, error: `non-JSON reply: ${text.slice(0, 200)}`, usage, raw });
     const missing = ((this.schema as any).required ?? []).filter((k: string) => !(k in (payload as any)));
     if (missing.length) return this.settle({ speaker: this.id, ok: false, error: `reply missing ${missing.join(",")}: ${text.slice(0, 200)}`, usage, raw });
@@ -233,22 +240,26 @@ export class Speaker {
     if (this.pending) return { speaker: this.id, ok: false, error: "turn already in flight" };
     this.schema = schema;
     const prompt = `${text}\n\nReply with only JSON matching this schema, no prose:\n${JSON.stringify(schema)}`;
+    this.nudged = false;
     return new Promise((resolve) => {
-      let oneShot: ChildProcess | undefined;
-      const t = setTimeout(() => { oneShot?.kill(); this.settle({ speaker: this.id, ok: false, error: `timeout ${timeoutMs}ms` }); }, timeoutMs);
+      const t = setTimeout(() => { this.oneShot?.kill(); this.settle({ speaker: this.id, ok: false, error: `timeout ${timeoutMs}ms` }); }, timeoutMs);
       this.pending = (r) => { clearTimeout(t); resolve(r); };
-      if (this.opts.cli === "cursor") {
-        oneShot = this.cursorOneShot(prompt);
-      } else if (this.opts.cli === "opencode") {
-        this.opencodeTurn(prompt);
-      } else if (this.opts.cli === "codex") {
-        this.lastText = ""; this.lastUsage = undefined;
-        this.rpc("turn/start", { threadId: this.session_id, input: [{ type: "text", text: prompt }], outputSchema: schema, ...(this.opts.thinking ? { effort: this.opts.thinking } : {}) })
-          .then((res) => { if (res?.error) this.settle({ speaker: this.id, ok: false, error: JSON.stringify(res.error).slice(0, 300) }); });
-      } else {
-        this.proc!.stdin!.write(JSON.stringify({ type: "user", message: { role: "user", content: prompt } }) + "\n");
-      }
+      this.dispatch(prompt);
     });
+  }
+  private oneShot?: ChildProcess;
+  private dispatch(prompt: string) {
+    if (this.opts.cli === "cursor") {
+      this.oneShot = this.cursorOneShot(prompt);
+    } else if (this.opts.cli === "opencode") {
+      this.opencodeTurn(prompt);
+    } else if (this.opts.cli === "codex") {
+      this.lastText = ""; this.lastUsage = undefined;
+      this.rpc("turn/start", { threadId: this.session_id, input: [{ type: "text", text: prompt }], outputSchema: this.schema, ...(this.opts.thinking ? { effort: this.opts.thinking } : {}) })
+        .then((res) => { if (res?.error) this.settle({ speaker: this.id, ok: false, error: JSON.stringify(res.error).slice(0, 300) }); });
+    } else {
+      this.proc!.stdin!.write(JSON.stringify({ type: "user", message: { role: "user", content: prompt } }) + "\n");
+    }
   }
 
   close() { this.proc?.stdin?.end(); this.proc?.kill(); }
@@ -273,6 +284,17 @@ function codexHome(cwd: string) {
     writeFileSync(join(home, "config.toml"), "[features]\napps = false\nbrowser_use = false\ncomputer_use = false\ncode_mode_host = false\n");
   }
   return home;
+}
+
+/** thinking variants opencode knows for a model ("provider/id"), from the live model list; empty when unknown */
+export async function opencodeVariants(cwd: string, model: string): Promise<string[]> {
+  try {
+    const oc = await opencodeServer(cwd);
+    const r = await fetch(oc.base + "/api/model", { headers: { authorization: oc.auth } });
+    const j: any = await r.json();
+    const m = (j?.data ?? []).find((x: any) => x.id === model);
+    return (m?.variants ?? []).map((v: any) => v.id);
+  } catch { return []; }
 }
 
 // One opencode server per host process, started on first use, killed with the host.

@@ -23,7 +23,7 @@ The room folder is the unit of state. Inside it:
 - `committee/diag.jsonl`: raw provider output for failed calls.
 - `committee/codex-home/`: a private `CODEX_HOME` for codex seats (auth only, no plugins).
 
-Commands inside pi: `/committee on|off|reset` (off = pi behaves normally, speakers stay alive; reset = delete committee.json and committee/ in this folder, so the next `/committee on` onboards again), `/seats` (add, change model or thinking, remove), `/usage` (per-seat token table).
+Commands inside pi: `/committee on|off|pause|resume|reset` (off = pi behaves normally, speakers stay alive; pause = calls in flight finish, nothing new starts, your messages are held until resume; reset = delete committee.json and committee/ in this folder, so the next `/committee on` onboards again), `/seats` (add, change model or thinking, remove), `/usage` (per-seat token table).
 
 With no `committee.json` in the folder, committee mode starts off and `/committee on` runs onboarding: detected CLIs, then per seat a CLI, a model from the live list, a thinking level, a name (a random adverb-adjective is offered) and an optional persona. The persona is free text or a path to a file (relative to the room folder, or `~`), read when the seat's first packet is built. It is set only at creation; to change it, remove the seat and add it again.
 
@@ -63,7 +63,7 @@ Measured on 2026-10-21, fresh tokens per call after the first:
 
 Onboarding marks codex and cursor as not supported for that reason. The adapters work; the cost does not.
 
-Thinking levels are per seat. claude: `--effort` low to max. codex: per-turn `effort`. opencode: the model variant, accepted names differ per model (measured: glm-5.3 low/high/max, gpt-sol low to max, deepseek-v4-pro none/low/high/max). cursor: a suffix in the model id.
+Thinking levels are per seat. claude: `--effort` low to max. codex: per-turn `effort`. opencode: the model variant; the picker reads the live list from opencode's /api/model, since names differ per model (glm-5.3 and glm-5.3-flash low/high/max, qwen3.8-flash none/high/max, deepseek-flash and -v4-pro none/low/high/max). A seat whose variant the model lacks fails every call with provider.no-route. cursor: a suffix in the model id.
 
 ## Usage is logged, never estimated
 
@@ -72,7 +72,7 @@ Every call appends a `usage` event: phase, fresh, cached, out, cost when the pro
 ## Files
 
 - `committee.ts`: the extension. Config, replay, packets, cycle, rendering, `/seats`, `/committee`, `/usage`, onboarding.
-- `speaker.ts`: `Speaker` class, one per seat. `send(text, schema)` returns `{ok, payload, usage, session_id, resumed}`. Schema goes in the prompt and the reply is parsed and checked locally, so one session serves both phases.
+- `speaker.ts`: `Speaker` class, one per seat. `send(text, schema)` returns `{ok, payload, usage, session_id, resumed}`. Schema goes in the prompt and the reply is parsed and checked locally, so one session serves both phases. A prose reply gets one nudge to resend as JSON, since models that just used tools often forget.
 - `schemas/`: intention (with the optional `tool` line) and response JSON schemas.
 - `example.json`: a reference cast. Not loaded; onboarding writes the real one.
 - `smoke.ts`: `bun smoke.ts` from a room folder runs every seat in example.json for two turns, then kills and resumes each session.
