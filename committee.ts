@@ -515,7 +515,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     for (const s of speakers) setState(s.meta.id, "thinking");
     const intents = await Promise.all(speakers.map((s) =>
       s.session.send(packet(s, "intention", ""), intentionSchema, timeoutMs)
-        .then((r) => { account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent}: ${p.topic}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent}` : "err:intention"); return r; })));
+        .then((r) => { account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r; })));
     const summary = intents.map((r) => r.ok ? `${r.speaker}: ${JSON.stringify(r.payload)}` : `${r.speaker}: ERROR ${r.error}`).join("\n");
     publish({ author: "host", kind: "intention", text: summary });
     for (const r of intents) if (!r.ok) { diag(r, "intention"); publish({ author: r.speaker, kind: "error", text: `intention failed: ${r.error}` }); }

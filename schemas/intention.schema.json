@@ -1,12 +1,6 @@
 {
   "type": "object",
   "properties": {
-    "version": {
-      "type": "integer",
-      "enum": [
-        1
-      ]
-    },
     "preference": {
       "type": "string",
       "enum": [
@@ -14,22 +8,6 @@
         "wait",
         "yield",
         "silent"
-      ]
-    },
-    "urgency": {
-      "type": "string",
-      "enum": [
-        "low",
-        "normal",
-        "high"
-      ]
-    },
-    "importance": {
-      "type": "string",
-      "enum": [
-        "low",
-        "normal",
-        "high"
       ]
     },
     "intent": {
@@ -55,9 +33,6 @@
         "long"
       ]
     },
-    "target": {
-      "type": "string"
-    },
     "tool": {
       "type": "string",
       "maxLength": 160,
@@ -65,14 +40,8 @@
     }
   },
   "required": [
-    "version",
     "preference",
-    "urgency",
-    "importance",
-    "intent",
-    "topic",
-    "length",
-    "target"
+    "topic"
   ],
-  "additionalProperties": false
+  "additionalProperties": true
 }

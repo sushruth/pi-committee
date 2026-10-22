@@ -25,9 +25,7 @@
     }
   },
   "required": [
-    "version",
-    "action",
-    "text"
+    "action"
   ],
-  "additionalProperties": false
+  "additionalProperties": true
 }
