@@ -485,8 +485,12 @@ export default function (pi: ExtensionAPI) {
         const body = wrapTextWithAnsi(d.kind === "tool" ? ansi(244, message.content) : message.content, Math.max(20, width - outputPad - 2));
         const seat = d.kind === "human" || d.kind === "tool" ? undefined : byId(d.author)?.meta ?? ghostOf(d.author);
         const w = (d.data as any)?.tools as { calls: number; chars: number } | undefined;
-        const who = seat ? [`${pad}${bar}${ansi(244, seatMeta(seat) + (w ? `   ⚙ ${w.calls} tool call${w.calls === 1 ? "" : "s"}, ${fmt(w.chars)} chars, kept in its session` : ""))}`] : [];
-        return [`${pad}${bar}${name}`, ...who, ...body.map((l) => `${pad}${bar}${l}`)];
+        // name on the left, cli:model #thinking (and the tool-work marker) right-aligned on the same line
+        const right = seat ? ansi(244, (w ? `⚙ ${w.calls} tool call${w.calls === 1 ? "" : "s"}, ${fmt(w.chars)} chars   ` : "") + seatMeta(seat)) : "";
+        const gap = width - outputPad - 1 - visibleWidth(name) - visibleWidth(right);
+        const head = gap >= 2 ? `${name}${" ".repeat(gap)}${right}` : name;
+        const who = seat && gap < 2 ? [`${pad}${bar}${right}`] : [];
+        return [`${pad}${bar}${head}`, ...who, ...body.map((l) => `${pad}${bar}${l}`)];
       },
     };
   });
