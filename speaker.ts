@@ -266,6 +266,7 @@ export class Speaker {
       return;
     }
     if (payload === undefined) return this.settle({ speaker: this.id, ok: false, error: `non-JSON reply: ${text.slice(0, 200)}`, usage, raw });
+    coerce(payload as Record<string, unknown>, this.schema);
     const missing = ((this.schema as any).required ?? []).filter((k: string) => !(k in (payload as any)));
     if (missing.length) return this.settle({ speaker: this.id, ok: false, error: `reply missing ${missing.join(",")}: ${text.slice(0, 200)}`, usage, raw });
     this.settle({ speaker: this.id, ok: true, session_id: this.session_id, resumed: this.resumed, payload, usage, tools: this.work.calls ? this.work : undefined, raw });
@@ -314,6 +315,19 @@ export class Speaker {
   }
 
   close() { this.proc?.stdin?.end(); this.proc?.kill(); }
+}
+
+// models mix up the two shapes (an intention answered as a response, or the reverse); map what can be mapped
+function coerce(p: Record<string, unknown>, schema: object) {
+  const want = ((schema as any).required ?? []) as string[];
+  if (want.includes("preference") && !("preference" in p) && typeof p.action === "string") {
+    p.preference = p.action === "speak" || p.action === "repeat" ? "speak" : p.action === "silent" ? "silent" : "wait";
+    p.topic ??= typeof p.text === "string" ? p.text.slice(0, 160) : "";
+  }
+  if (want.includes("topic") && !("topic" in p)) p.topic = "";
+  if (want.includes("action") && !("action" in p) && typeof p.preference === "string") {
+    p.action = p.preference === "speak" && typeof p.text === "string" && p.text.trim() ? "speak" : p.preference === "silent" ? "silent" : "wait";
+  }
 }
 
 function parseJson(text: string): unknown {

@@ -74,7 +74,7 @@ Every call appends a `usage` event: phase, fresh, cached, out, cost when the pro
 
 - `committee.ts`: the extension. Config, replay, packets, cycle, rendering, `/seats`, `/committee`, `/usage`, onboarding.
 - `speaker.ts`: `Speaker` class, one per seat. `send(text, schema)` returns `{ok, payload, usage, session_id, resumed}`. The prompt ends with the schema's first `examples` entry, a filled-in object, because small models copy an example and echo a schema; the schema itself is only the host's check, so one session serves both phases. A prose reply gets one nudge to resend as JSON, since models that just used tools often forget.
-- `schemas/`: intention and response JSON schemas. Only `preference` and `topic` (intention) and `action` (response) are required; everything else is optional and extra keys are ignored, since small models drop fields.
+- `schemas/`: intention and response JSON schemas. Only `preference` and `topic` (intention) and `action` (response) are required; everything else is optional and extra keys are ignored, since small models drop fields. A reply in the other phase's shape is mapped (`action` to `preference` and back, `text` to `topic`) before the check, since models mix the two up.
 - `example.json`: a reference cast. Not loaded; onboarding writes the real one.
 - `smoke.ts`: `bun smoke.ts` from a room folder runs every seat in example.json for two turns, then kills and resumes each session.
 
