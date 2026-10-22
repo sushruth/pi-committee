@@ -1,7 +1,13 @@
 {
+  "name": "pi-committee",
+  "version": "0.1.0",
+  "description": "A room of independent LLM speakers inside pi; they decide for themselves when to speak",
+  "repository": "github:sushruth/pi-committee",
   "private": true,
   "type": "module",
-  "dependencies": {
-    "ajv": "8.17.1"
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./committee.ts"],
+    "skills": ["./SKILL.md"]
   }
 }

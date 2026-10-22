@@ -137,7 +137,8 @@ export default function (pi: ExtensionAPI) {
   const seatMeta = (s: Seat) => `${s.cli}:${s.model.split("/").pop()}${s.thinking ? " #" + s.thinking : ""}`;
   const SEP = ` ${ansi(240, "·")} `;
   const GAP = 3; // visible width of SEP
-  const LOGO = ansi(244, "⚒") + "  ";
+  const ABOUT = "(⚒)"; // openSeat value when the logo panel is open
+  const LOGO = () => ansi(openSeat === ABOUT ? 250 : 244, ABOUT) + "  ";
   const initials = (id: string) => id.split(/[-_\s]+/).filter(Boolean).map((w) => w[0]).join("").slice(0, 3);
   const seatCell = (s: (typeof speakers)[number]) => {
     // ○ normally, ◉ when this seat's panel is open: same glyph family, same size, concentric
@@ -146,24 +147,41 @@ export default function (pi: ExtensionAPI) {
   };
   const ghostCell = (g: Ghost) => ansi(240, `${openSeat === g.id ? "◍" : "◌"} ${initials(g.id)} gone`);
   const cells = () => [...speakers.map((s) => ({ id: s.meta.id, text: seatCell(s) })), ...former.map((g) => ({ id: g.id, text: ghostCell(g) }))];
-  const statusLines = () => [LOGO + cells().map((c) => c.text).join(SEP)];
+  const statusLines = () => [LOGO() + cells().map((c) => c.text).join(SEP)];
   // panel for the clicked seat: full identity in the title, then state, last intention, last reply;
   // its bottom border opens over that seat's dot so the two read as one piece
   const detailLines = (width: number) => {
+    const inner = Math.max(20, width - 4);
+    const dim = (t: string) => ansi(244, t);
+    const frame = (title: string, body: string[]) => {
+      const t = truncateToWidth(title, Math.max(10, width - 4));
+      const top = dim("╭─" + t + "─".repeat(Math.max(0, width - 3 - visibleWidth(t))) + "╮");
+      const bottom = dim("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
+      return [top, ...body.map((l) => `${dim("│")} ${l}${" ".repeat(Math.max(0, inner - visibleWidth(l)))} ${dim("│")}`), bottom];
+    };
+    if (openSeat === ABOUT) {
+      const t = speakers.reduce((a, s) => ({ fresh: a.fresh + s.stat.fresh, cached: a.cached + s.stat.cached, out: a.out + s.stat.out, calls: a.calls + s.stat.calls, cost: a.cost + s.stat.cost }), { fresh: 0, cached: 0, out: 0, calls: 0, cost: 0 });
+      const pub = events.filter((e) => PUBLIC.includes(e.kind));
+      const row = (label: string, text: string) => wrapTextWithAnsi(`${ansi(250, label.padEnd(10))}${text}`, inner);
+      return frame(" pi-committee ", [
+        ...row("what", "a room of independent LLM speakers; each states an intention, sees the others', and decides for itself whether to speak. No facilitator."),
+        ...row("room", cwd),
+        ...row("seats", `${speakers.length} live${former.length ? `, ${former.length} former` : ""} · ${cfg.etiquette}`),
+        ...row("so far", `cycle ${cycleNo} · ${pub.length} messages · ${t.calls} calls`),
+        ...row("tokens", `fresh ${fmt(t.fresh)} · cached ${fmt(t.cached)} · out ${fmt(t.out)}`),
+        ...row("cost", t.cost ? `$${t.cost.toFixed(3)} (providers that report it)` : "not reported by these providers"),
+        ...row("source", "github.com/sushruth/pi-committee · /committee · /seats · /usage"),
+      ]);
+    }
     const s = openSeat ? byId(openSeat) : undefined;
     const g = openSeat && !s ? ghostOf(openSeat) : undefined;
     if (!s && !g) return [];
-    const inner = Math.max(20, width - 4);
-    const dim = (t: string) => ansi(244, t);
     const row = (label: string, text: string) => wrapTextWithAnsi(`${ansi(colorOf(openSeat!), label.padEnd(10))}${text}`, inner);
     const body = s
       ? [...row("state", `${glyph(s.stat.state)} ${s.stat.state}`), ...row("intention", s.stat.lastIntent ?? "(none yet)"), ...row("reply", s.stat.lastReply ?? "(none yet)")]
       : [...row("state", `◌ gone, left after ${g!.left}`), ...row("was", seatMeta(g!))];
     const m = s?.meta ?? g!;
-    const title = truncateToWidth(` ${m.id} · ${m.cli}:${m.model} ${m.thinking ? "#" + m.thinking + " " : ""}`, Math.max(10, width - 4));
-    const top = dim("╭─" + title + "─".repeat(Math.max(0, width - 3 - visibleWidth(title))) + "╮");
-    const bottom = dim("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
-    return [top, ...body.map((l) => `${dim("│")} ${l}${" ".repeat(Math.max(0, inner - visibleWidth(l)))} ${dim("│")}`), bottom];
+    return frame(` ${m.id} · ${m.cli}:${m.model} ${m.thinking ? "#" + m.thinking + " " : ""}`, body);
   };
   const widgetFactory = (tui: { requestRender(): void }) => {
     widgetTui = tui;
@@ -173,7 +191,8 @@ export default function (pi: ExtensionAPI) {
       handleMouse(ev: { type: string; button: string; x: number; y: number; height: number }) {
         if (ev.type !== "click" || ev.button !== "left" || ev.y !== ev.height - 1) return;
         // which seat sits under x on the status line
-        let x = 3; // after the logo
+        if (ev.x < 3) { openSeat = openSeat === ABOUT ? null : ABOUT; tui.requestRender(); return { handled: true }; }
+        let x = 5; // after the logo
         for (const c of cells()) {
           const w = visibleWidth(c.text);
           if (ev.x >= x && ev.x < x + w) { openSeat = openSeat === c.id ? null : c.id; tui.requestRender(); return { handled: true }; }
