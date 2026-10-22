@@ -1,6 +1,6 @@
 <h1><img src="logo.svg" alt="" height="36" valign="middle"> pi-committee</h1>
 
-pi-committee is an extension for the [pi](https://github.com/earendil-works/pi-coding-agent) coding agent. It turns a pi session into a chat room where you talk to several language models at once. Each model runs in its own CLI (Claude Code, Codex, OpenCode or pi) and decides for itself when to answer. The extension passes messages between the models, keeps the log, and counts tokens.
+pi-committee is an extension for the [pi](https://github.com/earendil-works/pi-coding-agent) coding agent. It turns a pi session into a chat room where you talk to several language models at once. Each model runs in its own CLI (Claude Code, Codex, OpenCode or pi; Cursor Agent is excluded, see the end) and decides for itself when to answer. The extension passes messages between the models, keeps the log, and counts tokens.
 
 ## Install
 
@@ -49,7 +49,6 @@ The table shows what one call costs after the seat's first call. I measured thes
 | opencode | 60 to 150 | runs one `opencode serve` per room from a private empty config directory; the seat uses any provider you are logged into |
 | codex | about 200 | runs `codex app-server` from a private `CODEX_HOME` whose config turns off the skills list, the built-in instructions and the feature tools |
 | pi | about 1,600 | runs one `pi -p` process per message with a replaced system prompt; OpenRouter returned no cache hits for pi |
-| cursor | about 1,000, plus 13,500 of fixed prompt | unsupported: cursor-agent has no flag that removes its server-side prompt |
 
 Cache behaviour depends on the provider. OpenRouter's `~latest` model aliases and `qwen3.8-flash` returned no cache hits in my tests, so every call to them costs the whole context. Fireworks returned no cache hits either.
 
@@ -89,6 +88,16 @@ The first round of each cycle (step 1 above) runs with tools off for every seat.
 - `committee/codex-home`, `committee/opencode-config` and `committee/pi-sessions` are the private directories those CLIs run from.
 
 A seat reads exactly one thing from your machine: the login for its CLI. Your own CLI settings, CLAUDE.md and AGENTS.md files, skills, plugins and MCP servers do not reach a seat. I verified this for codex, opencode and pi by running seats under a HOME directory that held only the login files, and for claude by placing a 4,000-word CLAUDE.md in the room folder and checking that the context size did not change.
+
+## Why Cursor Agent is not a seat
+
+I measured `cursor-agent` on 2026-10-22 and removed its adapter for these reasons:
+
+1. Every call carried about 13,500 tokens of prompt that Cursor adds on its server. No command-line flag removes it. Setting `CURSOR_CONFIG_DIR` changed nothing. Running it under a private `HOME` removed the login as well.
+2. cursor-agent reports one token total for a whole turn, with no per-step figure, so a Cursor seat could not show its live context size.
+3. cursor-agent has no flag that turns its tools off. A seat without tools was impossible, and the intention round could not run with tools off.
+
+The fixed prompt alone put a Cursor seat at about ten times the per-call cost of a Codex or OpenCode seat.
 
 ## Not built
 

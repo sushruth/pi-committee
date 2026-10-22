@@ -8,7 +8,6 @@
 //           (+ --resume <id>); JSON user messages on stdin, JSONL events on stdout.
 // codex:    long-lived `codex app-server` (JSON-RPC over stdio); thread/start or thread/resume,
 //           turn/start per message; answer = last agentMessage before turn/completed.
-// cursor:   one `cursor-agent -p --trust --output-format stream-json` process per message, --resume <id>.
 // opencode: one shared `opencode serve` per host, one session per speaker over HTTP
 //           (any provider opencode is logged into); a tool-less "speaker" agent is passed inline.
 // pi:       one `pi -p --mode json` process per message, --session-id resumes; its own system prompt is replaced.
@@ -19,14 +18,14 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 
-export type Cli = "claude" | "codex" | "cursor" | "opencode" | "pi";
+export type Cli = "claude" | "codex" | "opencode" | "pi";
 
 export interface SpeakerOpts {
   id: string;
   cli: Cli;
   model: string;
   cwd?: string;
-  /** reasoning effort: claude --effort, codex turn effort, opencode model variant, cursor model suffix (caller picks the id) */
+  /** reasoning effort: claude --effort, codex turn effort, opencode model variant, pi --thinking */
   thinking?: string;
   /** native session id from a previous run; the adapter resumes it, or starts fresh if that fails */
   session_id?: string;
@@ -90,8 +89,7 @@ export class Speaker {
   constructor(private opts: SpeakerOpts) {
     this.id = opts.id;
     this.session_id = opts.session_id;
-    if (opts.cli === "cursor" && !opts.tools) { this.ready = Promise.reject(new Error("cursor-agent has no flag that turns its tools off; give this seat tools \"read\" (--mode ask) or \"all\"")); this.ready.catch(() => {}); return; }
-    if (opts.cli === "cursor" || opts.cli === "pi") { this.resumed = !!opts.session_id; if (opts.cli === "pi") this.session_id ??= randomUUID(); return; }
+    if (opts.cli === "pi") { this.resumed = !!opts.session_id; this.session_id ??= randomUUID(); return; }
     if (opts.cli === "opencode") { this.ready = this.opencodeInit(); return; }
     this.proc = this.spawnLongLived();
     if (opts.cli === "codex") this.ready = this.codexInit();
@@ -179,30 +177,6 @@ export class Speaker {
     const turn = ev.params?.turn;
     if (turn?.status !== "completed") return this.settle({ speaker: this.id, ok: false, error: `turn ${turn?.status}: ${JSON.stringify(turn?.error ?? "").slice(0, 300)}`, raw: ev });
     this.settleJson(this.lastText, ev, this.lastUsage);
-  }
-
-  // ---------- cursor: one process per message. Its usage is one sum over every model step, so no ctx.
-  // --mode ask is its read-only mode; it has no flag that turns tools off (see the constructor)
-  private cursorOneShot(text: string): ChildProcess {
-    const { model, cwd, tools } = this.opts;
-    const args = ["-p", "--trust", ...(tools === "all" ? ["--force"] : ["--mode", "ask"]), "--model", model, "--output-format", "stream-json"];
-    if (this.session_id) args.push("--resume", this.session_id);
-    const proc = spawn("cursor-agent", [...args, text], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    let err = "", buf = "", result: any;
-    proc.stderr!.on("data", (d) => (err += d));
-    proc.stdout!.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); let ev: any; try { ev = JSON.parse(line); } catch { continue; }
-      if (ev.session_id) this.session_id = ev.session_id;
-      if (ev.type === "tool_call") { const [name, call]: [string, any] = Object.entries(ev.tool_call ?? {}).find(([k]) => k.endsWith("ToolCall")) ?? ["tool", {}];
-        if (ev.subtype === "started") this.act(`${name.replace(/ToolCall$/, "")} ${brief(call.args)}`);
-        else this.didTool(call.result?.success?.content ?? call.result); }
-      if (ev.type === "result") result = ev; } });
-    proc.on("exit", (code) => {
-      if (!result) return this.settle({ speaker: this.id, ok: false, error: `cursor exit ${code}: ${err.slice(-300)}` });
-      if (result.is_error) return this.settle({ speaker: this.id, ok: false, error: String(result.result).slice(0, 300), raw: result });
-      const u = result.usage ?? {};
-      this.settleJson(String(result.result ?? ""), result, { fresh: (u.inputTokens ?? 0) + (u.cacheWriteTokens ?? 0), cached: u.cacheReadTokens ?? 0, out: u.outputTokens ?? 0 });
-    });
-    return proc;
   }
 
   // ---------- pi: one process per message, session file under the room folder
@@ -297,7 +271,7 @@ export class Speaker {
   }
 
   /** Send one message; `schema` is the JSON shape the reply must match (put in the prompt, checked locally). */
-  /** tools off for this one call (the intention phase): pi gets --no-tools, opencode the tool-less agent; claude, codex and cursor are told */
+  /** tools off for this one call (the intention phase): pi gets --no-tools, opencode the tool-less agent; claude and codex are told */
   private noTools = false;
   async send(text: string, schema: object, timeoutMs = 120_000, opts: { noTools?: boolean } = {}): Promise<TurnResult> {
     this.noTools = !!opts.noTools && !!this.opts.tools;
@@ -307,7 +281,7 @@ export class Speaker {
     this.schema = schema;
     // small models copy an example reliably and echo a schema back; the schema stays the host's check
     const ex = (schema as any).examples?.[0];
-    const noToolsLine = this.noTools && (this.opts.cli === "claude" || this.opts.cli === "codex" || this.opts.cli === "cursor") ? "\nNo tools in this phase; just answer." : "";
+    const noToolsLine = this.noTools && (this.opts.cli === "claude" || this.opts.cli === "codex") ? "\nNo tools in this phase; just answer." : "";
     const prompt = ex ? `${text}${noToolsLine}\n\nReply with only one JSON object shaped like this, no prose:\n${JSON.stringify(ex)}`
       : `${text}\n\nReply with only JSON matching this schema, no prose:\n${JSON.stringify(schema)}`;
     this.nudged = false; this.work = { calls: 0, chars: 0 };
@@ -319,9 +293,7 @@ export class Speaker {
   }
   private oneShot?: ChildProcess;
   private dispatch(prompt: string) {
-    if (this.opts.cli === "cursor") {
-      this.oneShot = this.cursorOneShot(prompt);
-    } else if (this.opts.cli === "pi") {
+    if (this.opts.cli === "pi") {
       this.oneShot = this.piOneShot(prompt);
     } else if (this.opts.cli === "opencode") {
       this.opencodeTurn(prompt);
@@ -396,7 +368,7 @@ export function codexModels(cwd = process.cwd()): any[] {
   return [];
 }
 
-/** context window of a model in tokens: opencode's model list, pi's --list-models, codex's models_cache.json, claude's 200k default; 0 when unknown (cursor) */
+/** context window of a model in tokens: opencode's model list, pi's --list-models, codex's models_cache.json, claude's 200k default; 0 when unknown */
 export async function modelWindow(cli: Cli, model: string, cwd: string): Promise<number> {
   if (cli === "claude") return model.includes("[1m]") ? 1_000_000 : 200_000;
   if (cli === "codex") return codexModels(cwd).find((m: any) => m.slug === model)?.context_window ?? 0;

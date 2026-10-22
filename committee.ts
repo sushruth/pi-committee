@@ -301,7 +301,6 @@ export default function (pi: ExtensionAPI) {
   const modelsFor = async (cli: Cli): Promise<string[]> => {
     if (cli === "claude") return ["opus", "sonnet", "haiku"];
     if (cli === "codex") return codexModels(cwd).map((m: any) => m.slug).filter(Boolean);
-    if (cli === "cursor") return (await run("cursor-agent", ["--list-models"])).split("\n").map((l) => l.split(" - ")[0].trim()).filter((l) => l && !l.startsWith("Available"));
     if (cli === "pi") return (await run("pi", ["--list-models"])).split("\n").slice(1).map((l) => l.trim().split(/\s+/)).filter((p) => p.length > 1).map((p) => `${p[0]}/${p[1]}`);
     return (await run("opencode", ["models"])).split("\n").map((l) => l.trim()).filter((l) => l.includes("/"));
   };
@@ -352,7 +351,6 @@ export default function (pi: ExtensionAPI) {
     const list = cli === "opencode" && model ? (await opencodeVariants(cwd, model)).concat() : codexLevels.length ? codexLevels : thinkingFor(cli);
     if (cli === "opencode" && model && !list.length) ctx.ui.notify("opencode lists no variants for this model; the generic ladder is shown, the model may reject some", "warning");
     if (cli === "opencode" && !list.length) list.push(...thinkingFor(cli));
-    if (!list.length) { ctx.ui.notify("cursor sets thinking in the model id (e.g. glm-5.2-high)", "info"); return current; }
     const v = await ctx.ui.select(`Thinking (${cli})`, [current ?? DEFAULT, ...[DEFAULT, ...list].filter((x) => x !== (current ?? DEFAULT))]);
     return v === undefined ? undefined : v === DEFAULT ? "" : v;
   };
@@ -371,12 +369,11 @@ export default function (pi: ExtensionAPI) {
     claude: "recommended · ~1.5k tokens per call with the committee flags",
     pi: "recommended · any provider pi is logged into, its own prompt replaced",
     codex: "recommended · ~2.4k tokens per call with the committee config, ~200 fresh",
-    cursor: "not supported yet · ~13.5k tokens of its own prompt on every call, no flag removes it",
   };
   const SUPPORTED: Cli[] = ["opencode", "claude", "pi", "codex"];
   const installed = async (): Promise<Cli[]> => {
     const out: Cli[] = [];
-    for (const cli of ["claude", "codex", "cursor", "opencode", "pi"] as Cli[]) if ((await run("which", [cli === "cursor" ? "cursor-agent" : cli])).trim()) out.push(cli);
+    for (const cli of ["claude", "codex", "opencode", "pi"] as Cli[]) if ((await run("which", [cli])).trim()) out.push(cli);
     return out;
   };
   const ADVERBS = ["quietly", "simply", "boldly", "oddly", "nearly", "mostly", "barely", "wildly", "gently", "sharply", "plainly", "slowly", "briskly", "warmly", "coolly", "deeply"];
