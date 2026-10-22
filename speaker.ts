@@ -300,7 +300,7 @@ export async function opencodeVariants(cwd: string, model: string): Promise<stri
     const oc = await opencodeServer(cwd);
     const r = await fetch(oc.base + "/api/model", { headers: { authorization: oc.auth } });
     const j: any = await r.json();
-    const m = (j?.data ?? []).find((x: any) => x.id === model);
+    const m = (j?.data ?? []).find((x: any) => `${x.providerID}/${x.id}` === model || x.id === model);
     return (m?.variants ?? []).map((v: any) => v.id);
   } catch { return []; }
 }
