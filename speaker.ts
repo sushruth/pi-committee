@@ -29,11 +29,12 @@ export interface SpeakerOpts {
   thinking?: string;
   /** native session id from a previous run; the adapter resumes it, or starts fresh if that fails */
   session_id?: string;
-  /** read-only tools (read, grep, glob, shell); every call and result is reported through onTool */
-  tools?: boolean;
+  /** "read": read, grep, glob, shell for inspection; "all": everything the CLI has, writes included; every call and result is reported through onTool */
+  tools?: Tools;
   onTool?: (t: ToolUse) => void;
 }
 export interface ToolUse { name: string; input: string; output: string }
+export type Tools = "read" | "all";
 
 export interface Usage { fresh: number; cached: number; out: number; cost?: number }
 
@@ -51,7 +52,9 @@ export interface TurnResult {
 
 const SPEAKER_PROMPT = "You are one participant in a text conversation among humans and other models. You have no tools and no files. Reply only with the JSON the host asks for.";
 const TOOLS_PROMPT = "You are one participant in a text conversation among humans and other models. You have read-only tools: read files, grep, glob, and a shell for inspection. Never create, change or delete anything. Everything a tool returns is shown to the whole room, so ask for small results. Reply only with the JSON the host asks for.";
+const ALL_PROMPT = "You are one participant in a text conversation among humans and other models. You have your CLI's full tools, including editing files and running commands. Do only what the humans in the conversation asked for; plan and report otherwise. Everything a tool returns is shown to the whole room, so ask for small results. Reply only with the JSON the host asks for.";
 const CLAUDE_TOOLS = "Read,Grep,Glob,Bash";
+const promptFor = (t?: Tools) => t === "all" ? ALL_PROMPT : t === "read" ? TOOLS_PROMPT : SPEAKER_PROMPT;
 const OC_TOOLS_PERMISSION = { "*": "deny", read: "allow", grep: "allow", glob: "allow", list: "allow", bash: "allow" };
 const short = (v: unknown, n = 300) => { const s = typeof v === "string" ? v : JSON.stringify(v); return s.length > n ? s.slice(0, n) + "…" : s; };
 
@@ -89,9 +92,11 @@ export class Speaker {
     const args = cli === "claude"
       ? ["-p", "--verbose", "--model", model,
          "--input-format", "stream-json", "--output-format", "stream-json",
-         ...(this.opts.tools ? ["--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_TOOLS, "--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"] : ["--tools", ""]),
+         ...(this.opts.tools === "all" ? ["--permission-mode", "bypassPermissions"]
+           : this.opts.tools === "read" ? ["--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_TOOLS, "--disallowedTools", "Edit,Write,MultiEdit,NotebookEdit"]
+           : ["--tools", ""]),
          "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-         "--system-prompt", this.opts.tools ? TOOLS_PROMPT : SPEAKER_PROMPT, "--setting-sources", "",
+         "--system-prompt", promptFor(this.opts.tools), "--setting-sources", "",
          ...(this.opts.thinking ? ["--effort", this.opts.thinking] : []),
          ...(session_id ? ["--resume", session_id] : [])]
       : ["app-server"];
@@ -189,7 +194,7 @@ export class Speaker {
       if (r?.data?.id) { this.session_id = r.data.id; this.resumed = true; return; }
     }
     const [providerID, ...rest] = this.opts.model.split("/");
-    const res = await this.ocFetch("POST", "/api/session", { title: `committee:${this.id}`, agent: this.opts.tools ? "speaker-tools" : "speaker", model: { providerID, id: rest.join("/"), ...(this.opts.thinking ? { variant: this.opts.thinking } : {}) } });
+    const res = await this.ocFetch("POST", "/api/session", { title: `committee:${this.id}`, agent: this.opts.tools === "all" ? "speaker-all" : this.opts.tools === "read" ? "speaker-tools" : "speaker", model: { providerID, id: rest.join("/"), ...(this.opts.thinking ? { variant: this.opts.thinking } : {}) } });
     this.session_id = res?.data?.id;
     if (!this.session_id) throw new Error(`opencode session create failed: ${JSON.stringify(res).slice(0, 300)}`);
   }
@@ -311,6 +316,7 @@ function opencodeServer(cwd: string) {
     const config = JSON.stringify({ agent: {
       speaker: { description: "committee speaker", mode: "primary", permission: { "*": "deny" }, prompt: SPEAKER_PROMPT },
       "speaker-tools": { description: "committee speaker with read-only tools", mode: "primary", permission: OC_TOOLS_PERMISSION, prompt: TOOLS_PROMPT },
+      "speaker-all": { description: "committee speaker with every tool", mode: "primary", permission: { "*": "allow" }, prompt: ALL_PROMPT },
     } });
     const proc = spawn("opencode", ["serve", "--port", String(port)], { cwd, env: { ...process.env, OPENCODE_SERVER_PASSWORD: pw, OPENCODE_CONFIG_CONTENT: config }, stdio: ["ignore", "ignore", "pipe"] });
     let err = ""; proc.stderr!.on("data", (d) => (err += d));
