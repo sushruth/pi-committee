@@ -132,7 +132,9 @@ export default function (pi: ExtensionAPI) {
       if (!line.trim()) continue;
       const e = JSON.parse(line);
       if (e.kind === "human") c++;
-      record({ id: e.id, cycle: e.cycle ?? c, author: e.author, text: e.text, kind: e.kind });
+      record({ id: e.id, cycle: e.cycle ?? c, author: e.author, text: e.text, kind: e.kind, data: e.data });
+      // usage events carry each call's numbers, so totals and the context bar survive a restart
+      if (e.kind === "usage" && e.data) { const st = byId(e.author)?.stat; if (st) { st.calls++; st.fresh += e.data.fresh ?? 0; st.cached += e.data.cached ?? 0; st.out += e.data.out ?? 0; st.cost += e.data.cost ?? 0; if (e.data.ctx) st.ctx = e.data.ctx; } }
     }
   }
 
