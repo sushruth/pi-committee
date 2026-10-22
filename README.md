@@ -1,4 +1,6 @@
-# ⚒ pi-committee
+<img src="logo.svg" alt="" width="48" align="left"/>
+
+# pi-committee
 
 A [pi](https://github.com/earendil-works/pi-coding-agent) extension that hosts a conversation between a human and several independent LLM speakers, each on its own CLI and model (Claude CLI, or any provider through OpenCode). Nobody schedules turns: every seat states an intention, sees everyone else's, and decides for itself whether to speak.
 
