@@ -188,7 +188,7 @@ export class Speaker {
       "--session-dir", join(cwd ?? process.cwd(), "committee", "pi-sessions"), "--session-id", this.session_id!,
       "--system-prompt", promptFor(tools), "--model", model,
       ...(thinking ? ["--thinking", thinking] : []),
-      ...(tools === "all" ? [] : tools === "read" ? ["--tools", PI_READ_TOOLS] : ["--no-tools"])];
+      ...(this.noTools || !tools ? ["--no-tools"] : tools === "read" ? ["--tools", PI_READ_TOOLS] : [])];
     const proc = spawn("pi", [...args, text], { cwd, stdio: ["ignore", "pipe", "pipe"] });
     let err = "", last: any;
     proc.stderr!.on("data", (d) => (err += d));
@@ -224,7 +224,7 @@ export class Speaker {
     try { return JSON.parse(text); } catch { return { error: `${r.status} ${text.slice(0, 200)}` }; }
   }
   private async opencodeTurn(text: string) {
-    const sent = await this.ocFetch("POST", `/api/session/${this.session_id}/prompt`, { text });
+    const sent = await this.ocFetch("POST", `/api/session/${this.session_id}/prompt`, { text, ...(this.noTools ? { agent: "speaker" } : {}) });
     if (!sent?.data?.id) return this.settle({ speaker: this.id, ok: false, error: `opencode prompt failed: ${JSON.stringify(sent).slice(0, 300)}` });
     const t0 = sent.data.time?.created ?? Date.now();
     await this.ocFetch("POST", `/api/experimental/session/${this.session_id}/wait`);
@@ -260,14 +260,18 @@ export class Speaker {
   }
 
   /** Send one message; `schema` is the JSON shape the reply must match (put in the prompt, checked locally). */
-  async send(text: string, schema: object, timeoutMs = 120_000): Promise<TurnResult> {
+  /** tools off for this one call (the intention phase): pi gets --no-tools, opencode the tool-less agent, claude is told */
+  private noTools = false;
+  async send(text: string, schema: object, timeoutMs = 120_000, opts: { noTools?: boolean } = {}): Promise<TurnResult> {
+    this.noTools = !!opts.noTools && !!this.opts.tools;
     try { await this.ready; } catch (e) { return { speaker: this.id, ok: false, error: String(e) }; }
     if (this.dead) return { speaker: this.id, ok: false, error: "process exited" };
     if (this.pending) return { speaker: this.id, ok: false, error: "turn already in flight" };
     this.schema = schema;
     // small models copy an example reliably and echo a schema back; the schema stays the host's check
     const ex = (schema as any).examples?.[0];
-    const prompt = ex ? `${text}\n\nReply with only one JSON object shaped like this, no prose:\n${JSON.stringify(ex)}`
+    const noToolsLine = this.noTools && this.opts.cli === "claude" ? "\nNo tools in this phase; just answer." : "";
+    const prompt = ex ? `${text}${noToolsLine}\n\nReply with only one JSON object shaped like this, no prose:\n${JSON.stringify(ex)}`
       : `${text}\n\nReply with only JSON matching this schema, no prose:\n${JSON.stringify(schema)}`;
     this.nudged = false; this.work = { calls: 0, chars: 0 };
     return new Promise((resolve) => {
