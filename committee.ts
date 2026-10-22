@@ -380,13 +380,19 @@ export default function (pi: ExtensionAPI) {
     return speakers.length > 0;
   };
 
+  const pause = (ctx: ExtensionContext) => {
+    if (!active) return;
+    paused = true; ctx.ui.setStatus("committee", busy ? "pausing after this phase" : "paused");
+    ctx.ui.notify(busy ? "pausing: calls in flight finish, then nothing new starts · /committee resume" : "paused: your messages are logged, nobody answers until /committee resume", "info");
+  };
+  // escape pauses; resume is manual. pi reserves escape for its own interrupt, so this only
+  // takes effect when app.interrupt is bound elsewhere in ~/.pi/agent/keybindings.json
+  pi.registerShortcut("escape", { description: "committee: pause the seats", handler: (ctx) => pause(ctx) });
+  pi.registerShortcut("ctrl+p", { description: "committee: pause the seats", handler: (ctx) => pause(ctx) });
   pi.registerCommand("committee", {
     description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; reset = delete this folder's committee.json and committee/",
     handler: async (args, ctx) => {
-      if (args.trim() === "pause") {
-        paused = true; ctx.ui.setStatus("committee", busy ? "pausing after this phase" : "paused");
-        return ctx.ui.notify(busy ? "pausing: calls in flight finish, then nothing new starts" : "paused: your messages are logged, nobody answers until /committee resume", "info");
-      }
+      if (args.trim() === "pause") return pause(ctx);
       if (args.trim() === "resume") {
         paused = false; ctx.ui.setStatus("committee", "idle");
         if (heldWhilePaused && !busy) { heldWhilePaused = false; await runCycles(ctx); }
