@@ -239,7 +239,10 @@ export class Speaker {
     if (this.dead) return { speaker: this.id, ok: false, error: "process exited" };
     if (this.pending) return { speaker: this.id, ok: false, error: "turn already in flight" };
     this.schema = schema;
-    const prompt = `${text}\n\nReply with only JSON matching this schema, no prose:\n${JSON.stringify(schema)}`;
+    // small models copy an example reliably and echo a schema back; the schema stays the host's check
+    const ex = (schema as any).examples?.[0];
+    const prompt = ex ? `${text}\n\nReply with only one JSON object shaped like this, no prose:\n${JSON.stringify(ex)}`
+      : `${text}\n\nReply with only JSON matching this schema, no prose:\n${JSON.stringify(schema)}`;
     this.nudged = false;
     return new Promise((resolve) => {
       const t = setTimeout(() => { this.oneShot?.kill(); this.settle({ speaker: this.id, ok: false, error: `timeout ${timeoutMs}ms` }); }, timeoutMs);

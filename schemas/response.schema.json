@@ -27,5 +27,12 @@
   "required": [
     "action"
   ],
-  "additionalProperties": true
+  "additionalProperties": true,
+  "examples": [
+    {
+      "action": "speak",
+      "text": "your contribution, or empty for wait/silent",
+      "ref": "only for action repeat: the event id of your earlier reply"
+    }
+  ]
 }

@@ -17,7 +17,7 @@ pi --no-tools --no-mcp --no-skills --no-session --no-extensions --no-context-fil
 
 The room folder is the unit of state. Inside it:
 
-- `committee.json`: the seats, former seats and etiquette. Created by onboarding, edited by `/seats`. This is the file to share: it carries no sessions or transcript. On a machine that lacks a seat's CLI, startup offers to remap that seat or start without it.
+- `committee.json`: the seats, former seats, etiquette and the room brief: what every seat should know about this folder (which tools to measure with, which docs to read first), as text or a file path. It travels in the versioned rules block, so a change reaches live sessions once. Onboarding asks for it; `/committee brief <text|path>` changes it, `/committee brief -` clears it. Created by onboarding, edited by `/seats`. This is the file to share: it carries no sessions or transcript. On a machine that lacks a seat's CLI, startup offers to remap that seat or start without it.
 - `committee/events.jsonl`: the public log, append-only. Replayed on start so the conversation continues where it stopped.
 - `committee/sessions.json`: each seat's native session id, how much transcript it has seen, which rules version it has seen. A restart resumes sessions instead of re-sending history.
 - `committee/diag.jsonl`: raw provider output for failed calls.
@@ -72,7 +72,7 @@ Every call appends a `usage` event: phase, fresh, cached, out, cost when the pro
 ## Files
 
 - `committee.ts`: the extension. Config, replay, packets, cycle, rendering, `/seats`, `/committee`, `/usage`, onboarding.
-- `speaker.ts`: `Speaker` class, one per seat. `send(text, schema)` returns `{ok, payload, usage, session_id, resumed}`. Schema goes in the prompt and the reply is parsed and checked locally, so one session serves both phases. A prose reply gets one nudge to resend as JSON, since models that just used tools often forget.
+- `speaker.ts`: `Speaker` class, one per seat. `send(text, schema)` returns `{ok, payload, usage, session_id, resumed}`. The prompt ends with the schema's first `examples` entry, a filled-in object, because small models copy an example and echo a schema; the schema itself is only the host's check, so one session serves both phases. A prose reply gets one nudge to resend as JSON, since models that just used tools often forget.
 - `schemas/`: intention and response JSON schemas. Only `preference` and `topic` (intention) and `action` (response) are required; everything else is optional and extra keys are ignored, since small models drop fields.
 - `example.json`: a reference cast. Not loaded; onboarding writes the real one.
 - `smoke.ts`: `bun smoke.ts` from a room folder runs every seat in example.json for two turns, then kills and resumes each session.

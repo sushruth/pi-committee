@@ -26,6 +26,8 @@ interface Config {
   speakers: Seat[];
   former?: Ghost[];
   etiquette: string;
+  /** what every seat should know about this folder: text, or a path to a file (relative to the room, or ~) */
+  brief?: string;
   timeoutSeconds?: number;
 }
 interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona?: string; tools?: boolean }
@@ -68,11 +70,13 @@ export default function (pi: ExtensionAPI) {
   const byId = (id: string) => speakers.find((s) => s.meta.id === id);
   const ghostOf = (id: string) => former.find((g) => g.id === id);
   // persona is free text or a path (relative to the room folder, or ~); read when the first packet is built
-  const personaOf = (s: Seat) => {
-    const p = s.persona?.trim(); if (!p) return "";
+  const textOrFile = (v?: string) => {
+    const p = v?.trim(); if (!p) return "";
     for (const file of [p.replace(/^~(?=\/|$)/, homedir()), join(cwd, p)]) { try { if (existsSync(file)) return readFileSync(file, "utf8").trim(); } catch {} }
     return p;
   };
+  const personaOf = (s: Seat) => textOrFile(s.persona);
+  const briefOf = () => textOrFile(cfg.brief);
   const retire = (s: (typeof speakers)[number]) => {
     s.session.close(); speakers.splice(speakers.indexOf(s), 1);
     const last = [...events].reverse().find((e) => PUBLIC.includes(e.kind));
@@ -377,6 +381,11 @@ export default function (pi: ExtensionAPI) {
       const more = await ctx.ui.select(`${speakers.length} seat${speakers.length === 1 ? "" : "s"} so far`, ["add another seat", "done"]);
       if (more !== "add another seat") break;
     }
+    if (speakers.length) {
+      const b = (await ctx.ui.input("Room brief (optional): what seats should know about this folder, as text or a file path", ""))?.trim();
+      if (b) cfg.brief = b;
+      saveSeats();
+    }
     return speakers.length > 0;
   };
 
@@ -388,13 +397,19 @@ export default function (pi: ExtensionAPI) {
   // alt+p pauses; resume is manual. escape is out: pi reserves it for interrupt and select-cancel
   pi.registerShortcut("alt+p", { description: "committee: pause the seats", handler: (ctx) => pause(ctx) });
   pi.registerCommand("committee", {
-    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; reset = delete this folder's committee.json and committee/",
+    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; brief <text|path> = what seats should know about this folder (- clears); reset = delete this folder's committee.json and committee/",
     handler: async (args, ctx) => {
       if (args.trim() === "pause") return pause(ctx);
       if (args.trim() === "resume") {
         paused = false; ctx.ui.setStatus("committee", "idle");
         if (heldWhilePaused && !busy) { heldWhilePaused = false; await runCycles(ctx); }
         return ctx.ui.notify("resumed", "info");
+      }
+      if (args.trim().startsWith("brief")) {
+        const v = args.trim().slice(5).trim();
+        if (!v) return ctx.ui.notify(cfg.brief ? `brief: ${cfg.brief}` : "no brief; /committee brief <text or file path>", "info");
+        cfg.brief = v === "-" ? undefined : v; saveSeats();
+        return ctx.ui.notify(cfg.brief ? "brief set; every seat gets it on its next call" : "brief removed", "info");
       }
       if (args.trim() === "reset") {
         if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
@@ -473,7 +488,7 @@ export default function (pi: ExtensionAPI) {
 A human message never goes unanswered: if nobody has anything new to add, whoever answered the human most recently responds with action "repeat" and the event id of that earlier reply in ref, so it is shown again instead of silence.
 Tools: some seats have read-only tools (read files, grep, glob, a shell for inspection) in the room folder. Nobody tells you where you are: the first time a question needs the code or data, orient yourself (list the room folder, read a README or AGENTS file, find the repo or dataset the question is about) and say in one line what you found so the others need not. When a question needs measuring, measure before proposing, and split the lookups between the seats that have tools rather than all running the same one. If your turn needs a lookup, say what you would run in the intention's "tool" field, one line. Run tools only in the respond phase when you actually speak; if another seat's intention names the same lookup and it has spoken less, leave it to them. Lines marked ⚙ in the transcript are tool calls and results already made: reuse them, never repeat them. Plan and report; never create, change or delete anything unless the human says so, and even then only seats whose tools allow it.
 Two phases, always as JSON: "intention" (do you have something to add; topic is one sentence under 20 words), then "respond" (you see everyone's intentions and either hold, with action wait or silent, respond, with action speak and the contribution in text, or re-show an earlier reply of yours, with action repeat and its event id in ref).`;
-  const rulesText = () => `Etiquette: ${cfg.etiquette}\n${rules}`;
+  const rulesText = () => `Etiquette: ${cfg.etiquette}\n${rules}${briefOf() ? `\nAbout this room, from the human who set it up:\n${briefOf()}` : ""}`;
   const rulesVersion = () => createHash("sha1").update(rulesText()).digest("hex").slice(0, 8);
   const line = (e: Event) => `[${e.id} ${e.author}${e.kind === "tool" ? " ⚙" : ""}] ${e.text}`;
   const lastLedger = new Map<string, string>();

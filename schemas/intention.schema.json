@@ -43,5 +43,14 @@
     "preference",
     "topic"
   ],
-  "additionalProperties": true
+  "additionalProperties": true,
+  "examples": [
+    {
+      "preference": "speak",
+      "intent": "contribute",
+      "topic": "one sentence under 20 words on what you would add",
+      "length": "short",
+      "tool": "only if you have tools and need a lookup: what you would run"
+    }
+  ]
 }
