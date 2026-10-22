@@ -32,6 +32,8 @@ export interface SpeakerOpts {
   session_id?: string;
   /** "read": read, grep, glob, shell for inspection; "all": everything the CLI has, writes included. Tool work stays in the seat's session; the result only counts it */
   tools?: Tools;
+  /** live: the tool the seat is running right now (null when none); for the host's status line only */
+  onActivity?: (text: string | null) => void;
 }
 export interface ToolWork { calls: number; chars: number }
 export type Tools = "read" | "all";
@@ -59,6 +61,7 @@ const CLAUDE_TOOLS = "Read,Grep,Glob,Bash";
 const promptFor = (t?: Tools) => t === "all" ? ALL_PROMPT : t === "read" ? TOOLS_PROMPT : SPEAKER_PROMPT;
 const OC_TOOLS_PERMISSION = { "*": "deny", read: "allow", grep: "allow", glob: "allow", list: "allow", bash: "allow" };
 const PI_READ_TOOLS = "read,grep,find,ls,bash";
+const brief = (input: unknown) => { const o: any = input ?? {}; const s = String(o.command ?? o.pattern ?? o.path ?? o.file_path ?? o.query ?? JSON.stringify(o)); return s.replace(/\s+/g, " ").slice(0, 90); };
 
 export class Speaker {
   readonly id: string;
@@ -77,7 +80,8 @@ export class Speaker {
   private oc?: { base: string; auth: string };
   private work: ToolWork = { calls: 0, chars: 0 };
   private nudged = false;
-  private didTool(output: unknown) { this.work.calls++; this.work.chars += (typeof output === "string" ? output : JSON.stringify(output ?? "")).length; }
+  private act(text: string | null) { this.opts.onActivity?.(text); }
+  private didTool(output: unknown) { this.act(null); this.work.calls++; this.work.chars += (typeof output === "string" ? output : JSON.stringify(output ?? "")).length; }
 
   constructor(private opts: SpeakerOpts) {
     this.id = opts.id;
@@ -138,6 +142,7 @@ export class Speaker {
     try { ev = JSON.parse(line); } catch { return; }
     if (this.opts.cli === "codex") return this.onCodex(ev);
     if (ev.session_id) this.session_id = ev.session_id;
+    if (ev.type === "assistant") for (const b of ev.message?.content ?? []) if (b?.type === "tool_use") this.act(`${b.name} ${brief(b.input)}`);
     if (ev.type === "user") for (const b of ev.message?.content ?? []) if (b?.type === "tool_result") this.didTool(Array.isArray(b.content) ? b.content.map((p: any) => p.text ?? "").join("\n") : b.content);
     if (ev.type !== "result") return;
     if (ev.is_error) return this.settle({ speaker: this.id, ok: false, error: String(ev.result ?? ev.subtype), raw: ev });
@@ -194,6 +199,7 @@ export class Speaker {
     proc.stderr!.on("data", (d) => (err += d));
     let buf = "";
     proc.stdout!.on("data", (d) => { buf += d; let i; while ((i = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); let ev: any; try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.type === "tool_execution_start") this.act(`${ev.toolName} ${brief(ev.args)}`);
       if (ev.type === "tool_execution_end") this.didTool(ev.result?.content?.map?.((p: any) => p.text ?? "").join("") ?? ev.result);
       if (ev.type === "turn_end") last = ev.message; } });
     proc.on("exit", (code) => {
@@ -227,7 +233,17 @@ export class Speaker {
     const sent = await this.ocFetch("POST", `/api/session/${this.session_id}/prompt`, { text, ...(this.noTools ? { agent: "speaker" } : {}) });
     if (!sent?.data?.id) return this.settle({ speaker: this.id, ok: false, error: `opencode prompt failed: ${JSON.stringify(sent).slice(0, 300)}` });
     const t0 = sent.data.time?.created ?? Date.now();
-    await this.ocFetch("POST", `/api/experimental/session/${this.session_id}/wait`);
+    // poll the message list while waiting so the host can show which tool is running
+    let done = false;
+    const waiting = this.ocFetch("POST", `/api/experimental/session/${this.session_id}/wait`).then(() => { done = true; });
+    while (!done) {
+      await Promise.race([waiting, new Promise((r) => setTimeout(r, 1500))]);
+      if (done) break;
+      const peek = await this.ocFetch("GET", `/api/session/${this.session_id}/message`);
+      const running = (peek?.data ?? []).filter((m: any) => m.type === "assistant" && (m.time?.created ?? 0) >= t0).flatMap((m: any) => m.content ?? []).find((p: any) => p.type === "tool" && p.state?.status !== "completed" && p.state?.status !== "error");
+      this.act(running ? `${running.name} ${brief(running.state?.input)}` : null);
+    }
+    this.act(null);
     const list = await this.ocFetch("GET", `/api/session/${this.session_id}/message`);
     // one assistant message per model step (a tool round is a step): oldest first, text from the last, usage summed
     const steps = (list?.data ?? []).filter((m: any) => m.type === "assistant" && (m.time?.created ?? 0) >= t0).reverse();

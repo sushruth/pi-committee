@@ -37,7 +37,7 @@ interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona
 interface Ghost { id: string; cli: Cli; model: string; thinking?: string; left: string }
 type Kind = "human" | "speak" | "error" | "intention" | "usage" | "tool";
 interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown }
-interface Stat { state: string; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; lastReply?: string }
+interface Stat { state: string; since: number; activity?: string; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; lastReply?: string }
 interface Saved { cli: Cli; model: string; thinking?: string; tools?: Tools; session_id?: string; sent: number; rules?: string }
 const PUBLIC: Kind[] = ["human", "speak", "error"]; // "tool" events from older logs are history only
 
@@ -62,10 +62,10 @@ export default function (pi: ExtensionAPI) {
     const match = prev && prev.cli === meta.cli && prev.model === meta.model && (prev.thinking ?? "") === (meta.thinking ?? "") && (prev.tools ?? "") === (meta.tools ?? "");
     return {
       meta,
-      session: new Speaker({ id: meta.id, cli: meta.cli, model: meta.model, thinking: meta.thinking, cwd, session_id: match ? prev.session_id : undefined, tools: meta.tools }),
+      session: new Speaker({ id: meta.id, cli: meta.cli, model: meta.model, thinking: meta.thinking, cwd, session_id: match ? prev.session_id : undefined, tools: meta.tools, onActivity: (t) => { const st = byId(meta.id)?.stat; if (st) { st.activity = t ?? undefined; refresh(); } } }),
       sent: match ? prev.sent : 0,
       rulesSeen: match ? prev.rules : undefined,
-      stat: { state: "idle", fresh: 0, cached: 0, out: 0, cost: 0, calls: 0, turns: 0, lastSpoke: 0 } as Stat,
+      stat: { state: "idle", since: Date.now(), fresh: 0, cached: 0, out: 0, cost: 0, calls: 0, turns: 0, lastSpoke: 0 } as Stat,
     };
   };
   for (const s of cfg.speakers) if ((s.tools as unknown) === true) s.tools = "read"; // older configs stored a boolean
@@ -198,9 +198,9 @@ export default function (pi: ExtensionAPI) {
     widgetTui = tui;
     return {
       invalidate() {},
-      render(width: number) { return [...detailLines(width), ...statusLines().map((l) => truncateToWidth(l, width))]; },
+      render(width: number) { tick(); return [...detailLines(width), ...statusLines().map((l) => truncateToWidth(l, width)), ...activityLines().map((l) => truncateToWidth(l, width))]; },
       handleMouse(ev: { type: string; button: string; x: number; y: number; height: number }) {
-        if (ev.type !== "click" || ev.button !== "left" || ev.y !== ev.height - 1) return;
+        if (ev.type !== "click" || ev.button !== "left" || ev.y !== ev.height - 1 - activityLines().length) return;
         // which seat sits under x on the status line
         if (ev.x < 3) { openSeat = openSeat === ABOUT ? null : ABOUT; tui.requestRender(); return { handled: true }; }
         let x = 5; // after the logo
@@ -224,7 +224,14 @@ export default function (pi: ExtensionAPI) {
     widgetTui = undefined;
     ui?.setWidget("committee", [header, ...rows]);
   };
-  const setState = (id: string, state: string) => { const s = byId(id); if (s) s.stat.state = state; refresh(); };
+  const setState = (id: string, state: string) => { const s = byId(id); if (s && s.stat.state !== state) { s.stat.state = state; s.stat.since = Date.now(); if (!BUSY.has(state)) s.stat.activity = undefined; } refresh(); };
+  const BUSY = new Set(["thinking", "working", "replying"]);
+  const elapsed = (ms: number) => { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`; };
+  // one dim line per busy seat: what it is doing and for how long; a ticker keeps the clock moving
+  const activityLines = () => speakers.filter((s) => BUSY.has(s.stat.state)).map((s) =>
+    `${ansi(colorOf(s.meta.id), initials(s.meta.id))} ${ansi(244, `${s.stat.state} ${elapsed(Date.now() - s.stat.since)}${s.stat.activity ? " · ⚙ " + s.stat.activity : s.stat.state === "working" ? " · waiting on the model" : ""}`)}`);
+  let ticker: ReturnType<typeof setInterval> | undefined;
+  const tick = () => { const anyBusy = speakers.some((s) => BUSY.has(s.stat.state)); if (anyBusy && !ticker) ticker = setInterval(() => widgetTui?.requestRender(), 1000); if (!anyBusy && ticker) { clearInterval(ticker); ticker = undefined; } };
 
   pi.on("session_start", async (_e, ctx) => {
     ui = ctx.ui;
@@ -602,5 +609,5 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     } finally { busy = false; }
   }
 
-  pi.on("session_shutdown", async () => { saveSessions(); for (const s of speakers) s.session.close(); });
+  pi.on("session_shutdown", async () => { if (ticker) clearInterval(ticker); saveSessions(); for (const s of speakers) s.session.close(); });
 }
