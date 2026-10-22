@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "speak",
+        "repeat",
+        "wait",
+        "silent"
+      ]
+    },
+    "text": {
+      "type": "string"
+    },
+    "ref": {
+      "type": "string",
+      "description": "for action repeat: the event id of your earlier reply to re-show"
+    }
+  },
+  "required": [
+    "version",
+    "action",
+    "text"
+  ],
+  "additionalProperties": false
+}

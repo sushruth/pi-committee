@@ -1,0 +1,73 @@
+{
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "preference": {
+      "type": "string",
+      "enum": [
+        "speak",
+        "wait",
+        "yield",
+        "silent"
+      ]
+    },
+    "urgency": {
+      "type": "string",
+      "enum": [
+        "low",
+        "normal",
+        "high"
+      ]
+    },
+    "importance": {
+      "type": "string",
+      "enum": [
+        "low",
+        "normal",
+        "high"
+      ]
+    },
+    "intent": {
+      "type": "string",
+      "enum": [
+        "contribute",
+        "question",
+        "correct",
+        "warn",
+        "respond",
+        "invite",
+        "listen"
+      ]
+    },
+    "topic": {
+      "type": "string",
+      "maxLength": 160
+    },
+    "length": {
+      "type": "string",
+      "enum": [
+        "short",
+        "long"
+      ]
+    },
+    "target": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "preference",
+    "urgency",
+    "importance",
+    "intent",
+    "topic",
+    "length",
+    "target"
+  ],
+  "additionalProperties": false
+}

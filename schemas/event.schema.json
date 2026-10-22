@@ -1,0 +1,54 @@
+{
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "time": {
+      "type": "string"
+    },
+    "cycle": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "message",
+        "membership",
+        "etiquette",
+        "memory",
+        "intentions",
+        "response",
+        "error",
+        "cycle",
+        "pause"
+      ]
+    },
+    "speaker": {
+      "type": "string"
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "version",
+    "seq",
+    "time",
+    "cycle",
+    "kind",
+    "speaker",
+    "data"
+  ],
+  "additionalProperties": false
+}

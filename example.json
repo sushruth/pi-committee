@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "speakers": [
+    { "id": "opus", "cli": "claude", "model": "opus" },
+    { "id": "sol", "cli": "opencode", "model": "openrouter/~openai/gpt-sol-latest" },
+    { "id": "glm", "cli": "opencode", "model": "openrouter/z-ai/glm-5.3" },
+    { "id": "deepseek", "cli": "opencode", "model": "deepseek/deepseek-v4-pro", "thinking": "none" }
+  ],
+  "etiquette": "Be conversational and brief. Silence is welcome. Yield when someone else covers your point. Humans can speak at any time. Nobody schedules turns.",
+  "timeoutSeconds": 120
+}

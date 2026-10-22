@@ -1,0 +1,64 @@
+{
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "speakers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+          },
+          "cli": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "codex",
+              "cursor"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "persona": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "cli",
+          "model",
+          "persona"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "etiquette": {
+      "type": "string"
+    },
+    "discussionMemory": {
+      "type": "string"
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "required": [
+    "version",
+    "speakers",
+    "etiquette",
+    "discussionMemory",
+    "timeoutSeconds"
+  ],
+  "additionalProperties": false
+}

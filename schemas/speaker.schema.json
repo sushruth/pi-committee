@@ -1,0 +1,31 @@
+{
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,39}$"
+    },
+    "cli": {
+      "type": "string",
+      "enum": [
+        "claude",
+        "codex",
+        "cursor"
+      ]
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1
+    },
+    "persona": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "cli",
+    "model",
+    "persona"
+  ],
+  "additionalProperties": false
+}
