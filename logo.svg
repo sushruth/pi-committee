@@ -1,11 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 64" width="96" height="64" fill="none" stroke="#8b949e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-  <!-- parentheses -->
-  <path d="M18 8c-10 14-10 34 0 48"/>
-  <path d="M78 8c10 14 10 34 0 48"/>
-  <!-- hammer: handle bottom-left to head top-right -->
-  <path d="M34 52 L58 28"/>
-  <path d="M52 18l14 14 6-6-14-14z" fill="#8b949e"/>
-  <!-- pick: handle bottom-right to top-left, curved head -->
-  <path d="M62 52 L38 28"/>
-  <path d="M26 16c6-6 16-6 22 0-2-6-8-10-14-8-4 1-7 4-8 8z" fill="#8b949e"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80" width="120" height="80" fill="none" stroke="#8b949e" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M22 8c-14 18-14 46 0 64"/>
+  <path d="M98 8c14 18 14 46 0 64"/>
+  <path d="M38 66 L74 30"/>
+  <path d="M66 20 l18 18 10-10 -18-18z" fill="#8b949e" stroke-width="3"/>
+  <path d="M82 66 L46 30"/>
+  <path d="M26 34 Q44 8 64 26" stroke-width="7"/>
 </svg>
