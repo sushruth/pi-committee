@@ -388,7 +388,6 @@ export default function (pi: ExtensionAPI) {
   // escape pauses; resume is manual. pi reserves escape for its own interrupt, so this only
   // takes effect when app.interrupt is bound elsewhere in ~/.pi/agent/keybindings.json
   pi.registerShortcut("escape", { description: "committee: pause the seats", handler: (ctx) => pause(ctx) });
-  pi.registerShortcut("ctrl+p", { description: "committee: pause the seats", handler: (ctx) => pause(ctx) });
   pi.registerCommand("committee", {
     description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; reset = delete this folder's committee.json and committee/",
     handler: async (args, ctx) => {

@@ -23,7 +23,7 @@ The room folder is the unit of state. Inside it:
 - `committee/diag.jsonl`: raw provider output for failed calls.
 - `committee/codex-home/`: a private `CODEX_HOME` for codex seats (auth only, no plugins).
 
-Commands inside pi: `/committee on|off|pause|resume|reset` (off = pi behaves normally, speakers stay alive; pause = calls in flight finish, nothing new starts, your messages are held until resume; reset = delete committee.json and committee/ in this folder, so the next `/committee on` onboards again), `/seats` (add, change model or thinking, remove), `/usage` (per-seat token table).
+Commands inside pi: `/committee on|off|pause|resume|reset` (off = pi behaves normally, speakers stay alive; pause = calls in flight finish, nothing new starts, your messages are held until resume; escape does the same once pi's own interrupt is moved off escape, see below; reset = delete committee.json and committee/ in this folder, so the next `/committee on` onboards again), `/seats` (add, change model or thinking, remove), `/usage` (per-seat token table).
 
 With no `committee.json` in the folder, committee mode starts off and `/committee on` runs onboarding: detected CLIs, then per seat a CLI, a model from the live list, a thinking level, a name (a random adverb-adjective is offered) and an optional persona. The persona is free text or a path to a file (relative to the room folder, or `~`), read when the seat's first packet is built. It is set only at creation; to change it, remove the seat and add it again.
 
@@ -83,3 +83,11 @@ Every call appends a `usage` event: phase, fresh, cached, out, cost when the pro
 - A new CLI or provider: add a case in speaker.ts with the same three jobs as the others: start or resume a session, send one message and parse the reply, report fresh/cached/out. Measure its fixed per-call context before recommending it.
 - Changing a seat's model or thinking gives it a fresh session; its past lines stay in the transcript and the ledger. Removing a seat keeps its lines too. Adding a seat is not announced to the others; they see its lines appear.
 - Not built, by choice: nomination rounds, a soft deadline for slow seats, a facilitator, a cap on LLM-to-LLM cycles.
+
+## Escape to pause
+
+pi reserves escape for its own interrupt and skips any extension shortcut on it. To let escape pause the room, move the interrupt in `~/.pi/agent/keybindings.json` (then `/reload` or restart):
+
+```json
+{ "app.interrupt": "alt+i" }
+```
