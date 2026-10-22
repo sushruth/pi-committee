@@ -156,7 +156,8 @@ export default function (pi: ExtensionAPI) {
   const seatCell = (s: (typeof speakers)[number]) => {
     // ○ normally, ◉ when this seat's panel is open: same glyph family, same size, concentric
     const dot = openSeat === s.meta.id ? "◍" : "◯";
-    return `${ansi(colorOf(s.meta.id), dot + " " + initials(s.meta.id))} ${ansi(stateColor(s.stat.state), s.stat.state)}`;
+    const live = BUSY.has(s.stat.state) ? (s.stat.activity ? `⚙ ${s.stat.activity.split(" ")[0]}` : s.stat.state) + " " + elapsed(Date.now() - s.stat.since) : s.stat.state;
+    return `${ansi(colorOf(s.meta.id), dot + " " + initials(s.meta.id))} ${ansi(stateColor(s.stat.state), live)}`;
   };
   const ghostCell = (g: Ghost) => ansi(240, `${openSeat === g.id ? "◍" : "◌"} ${initials(g.id)} gone`);
   const cells = () => [...speakers.map((s) => ({ id: s.meta.id, text: seatCell(s) })), ...former.map((g) => ({ id: g.id, text: ghostCell(g) }))];
@@ -191,7 +192,7 @@ export default function (pi: ExtensionAPI) {
     if (!s && !g) return [];
     const row = (label: string, text: string) => wrapTextWithAnsi(`${ansi(colorOf(openSeat!), label.padEnd(10))}${text}`, inner);
     const body = s
-      ? [...row("state", `${glyph(s.stat.state)} ${s.stat.state}`), ...row("intention", s.stat.lastIntent ?? "(none yet)"), ...row("reply", s.stat.lastReply ?? "(none yet)")]
+      ? [...row("state", `${glyph(s.stat.state)} ${s.stat.state}${BUSY.has(s.stat.state) ? " " + elapsed(Date.now() - s.stat.since) : ""}`), ...(s.stat.activity ? row("now", `⚙ ${s.stat.activity}`) : []), ...row("intention", s.stat.lastIntent ?? "(none yet)"), ...row("reply", s.stat.lastReply ?? "(none yet)")]
       : [...row("state", `◌ gone, left after ${g!.left}`), ...row("was", seatMeta(g!))];
     const m = s?.meta ?? g!;
     return frame(` ${m.id} · ${m.cli}:${m.model} ${m.thinking ? "#" + m.thinking + " " : ""}`, body);
@@ -200,9 +201,9 @@ export default function (pi: ExtensionAPI) {
     widgetTui = tui;
     return {
       invalidate() {},
-      render(width: number) { tick(); return [...detailLines(width), ...statusLines().map((l) => truncateToWidth(l, width)), ...activityLines().map((l) => truncateToWidth(l, width))]; },
+      render(width: number) { tick(); return [...detailLines(width), ...statusLines().map((l) => truncateToWidth(l, width))]; },
       handleMouse(ev: { type: string; button: string; x: number; y: number; height: number }) {
-        if (ev.type !== "click" || ev.button !== "left" || ev.y !== ev.height - 1 - activityLines().length) return;
+        if (ev.type !== "click" || ev.button !== "left" || ev.y !== ev.height - 1) return;
         // which seat sits under x on the status line
         if (ev.x < 3) { openSeat = openSeat === ABOUT ? null : ABOUT; tui.requestRender(); return { handled: true }; }
         let x = 5; // after the logo
@@ -230,9 +231,7 @@ export default function (pi: ExtensionAPI) {
   const setState = (id: string, state: string) => { const s = byId(id); if (s && s.stat.state !== state) { s.stat.state = state; s.stat.since = Date.now(); if (!BUSY.has(state)) s.stat.activity = undefined; } refresh(); };
   const BUSY = new Set(["thinking", "working", "replying"]);
   const elapsed = (ms: number) => { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`; };
-  // one dim line per busy seat: what it is doing and for how long; a ticker keeps the clock moving
-  const activityLines = () => speakers.filter((s) => BUSY.has(s.stat.state)).map((s) =>
-    `${ansi(colorOf(s.meta.id), initials(s.meta.id))} ${ansi(244, `${s.stat.state} ${elapsed(Date.now() - s.stat.since)}${s.stat.activity ? " · ⚙ " + s.stat.activity : s.stat.state === "working" ? " · waiting on the model" : ""}`)}`);
+  // the clock in the seat cells ticks while anyone is busy
   let ticker: ReturnType<typeof setInterval> | undefined;
   const tick = () => { const anyBusy = speakers.some((s) => BUSY.has(s.stat.state)); if (anyBusy && !ticker) ticker = setInterval(() => widgetTui?.requestRender(), 1000); if (!anyBusy && ticker) { clearInterval(ticker); ticker = undefined; } };
 
