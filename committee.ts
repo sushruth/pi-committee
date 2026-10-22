@@ -13,7 +13,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SelectList, Text, fuzzyFilter, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
@@ -367,8 +367,21 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand("committee", {
-    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual",
+    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; reset = forget the conversation, keep the seats",
     handler: async (args, ctx) => {
+      if (args.trim() === "reset") {
+        if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
+        const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
+        const ok = await ctx.ui.select(`Forget this room's conversation (${n} messages) and every seat's session? Seats stay.`, ["keep it", "reset"]);
+        if (ok !== "reset") return;
+        for (const s of speakers) s.session.close();
+        for (const p of [logPath, sessPath, diagPath]) rmSync(p, { force: true });
+        events.length = 0; cycleNo = 0; floorHolder = null; lastLedger.clear(); openSeat = null;
+        for (const k of Object.keys(saved)) delete saved[k];
+        for (const s of speakers) { s.session = new Speaker({ id: s.meta.id, cli: s.meta.cli, model: s.meta.model, thinking: s.meta.thinking, cwd }); s.sent = 0; s.rulesSeen = undefined; s.stat = { state: "idle", fresh: 0, cached: 0, out: 0, cost: 0, calls: 0, turns: 0, lastSpoke: 0 }; }
+        saveSessions(); refresh();
+        return ctx.ui.notify("room reset: transcript and sessions gone, seats kept. Earlier messages above are history only; /clear to drop them from view.", "info");
+      }
       const want = args.trim() === "on" ? true : args.trim() === "off" ? false : !active;
       if (busy && !want) return ctx.ui.notify("wait for the committee to settle first", "warning");
       if (want && speakers.length === 0 && !(await onboarding(ctx))) return ctx.ui.notify("no seats, committee stays off", "warning");
