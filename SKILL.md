@@ -88,3 +88,14 @@ Every call appends a `usage` event: phase, fresh, cached, out, cost when the pro
 ## Why not escape to pause
 
 pi reserves escape for its own interrupt and for cancelling pickers, and skips any extension shortcut on a reserved key even when the interrupt is rebound. alt+p is the pause key instead.
+
+## Portable: a room depends on logins, not on the machine
+
+Tested on 2026-10-22 by running seats under a HOME that held only each CLI's auth file: codex, opencode and pi behaved identically (same context size, same cache hits). What each seat reads from the machine, and nothing else:
+
+- claude: the login (Keychain on macOS). `--setting-sources ""` and `--strict-mcp-config` with an empty MCP config keep settings and MCP out; a 4,000-word CLAUDE.md in the room folder did not change the context size (964 tokens either way).
+- codex: `~/.codex/auth.json`, copied once into the room's private `committee/codex-home`, whose `config.toml` is rewritten on every start. The model list is read from that private home (codex writes `models_cache.json` there on first run), with `~/.codex` only as a fallback.
+- opencode: `~/.local/share/opencode/auth.json`. The server runs with `XDG_CONFIG_HOME` pointed at an empty `committee/opencode-config`, so `~/.config/opencode` (AGENTS.md, skills, plugins, MCP servers) never reaches a seat; on a machine with those present that cut ~3.4k tokens per seat.
+- pi: `~/.pi/agent/auth.json`; the flags disable extensions, skills, MCP, prompt templates and context files.
+
+A shared `committee.json` therefore works anywhere the same CLIs are installed and logged in; `/committee on` offers to remap a seat whose CLI is missing.

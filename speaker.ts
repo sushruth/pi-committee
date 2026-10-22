@@ -389,14 +389,17 @@ function codexHome(cwd: string) {
 }
 
 /** codex's own model list (~/.codex/models_cache.json): slug, context_window, supported_reasoning_levels */
-export function codexModels(): any[] {
-  try { return JSON.parse(readFileSync(join(homedir(), ".codex", "models_cache.json"), "utf8")).models ?? []; } catch { return []; }
+export function codexModels(cwd = process.cwd()): any[] {
+  for (const p of [join(cwd, "committee", "codex-home", "models_cache.json"), join(homedir(), ".codex", "models_cache.json")]) {
+    try { return JSON.parse(readFileSync(p, "utf8")).models ?? []; } catch {}
+  }
+  return [];
 }
 
 /** context window of a model in tokens: opencode's model list, pi's --list-models, codex's models_cache.json, claude's 200k default; 0 when unknown (cursor) */
 export async function modelWindow(cli: Cli, model: string, cwd: string): Promise<number> {
   if (cli === "claude") return model.includes("[1m]") ? 1_000_000 : 200_000;
-  if (cli === "codex") return codexModels().find((m: any) => m.slug === model)?.context_window ?? 0;
+  if (cli === "codex") return codexModels(cwd).find((m: any) => m.slug === model)?.context_window ?? 0;
   if (cli === "opencode") {
     try {
       const oc = await opencodeServer(cwd);
@@ -439,7 +442,9 @@ function opencodeServer(cwd: string) {
       "speaker-tools": { description: "committee speaker with read-only tools", mode: "primary", permission: OC_TOOLS_PERMISSION, prompt: TOOLS_PROMPT },
       "speaker-all": { description: "committee speaker with every tool", mode: "primary", permission: { "*": "allow" }, prompt: ALL_PROMPT },
     } });
-    const proc = spawn("opencode", ["serve", "--port", String(port)], { cwd, env: { ...process.env, OPENCODE_SERVER_PASSWORD: pw, OPENCODE_CONFIG_CONTENT: config }, stdio: ["ignore", "ignore", "pipe"] });
+    const configHome = join(cwd, "committee", "opencode-config");
+    mkdirSync(join(configHome, "opencode"), { recursive: true });
+    const proc = spawn("opencode", ["serve", "--port", String(port)], { cwd, env: { ...process.env, XDG_CONFIG_HOME: configHome, OPENCODE_SERVER_PASSWORD: pw, OPENCODE_CONFIG_CONTENT: config }, stdio: ["ignore", "ignore", "pipe"] });
     let err = ""; proc.stderr!.on("data", (d) => (err += d));
     process.on("exit", () => proc.kill());
     const base = `http://127.0.0.1:${port}`;
