@@ -179,6 +179,11 @@ export default function (pi: ExtensionAPI) {
       const bottom = dim("╰" + "─".repeat(Math.max(0, width - 2)) + "╯");
       return [top, ...body.map((l) => `${dim("│")} ${l}${" ".repeat(Math.max(0, inner - visibleWidth(l)))} ${dim("│")}`), bottom];
     };
+    if (openSeat === COST) {
+      const total = speakers.reduce((a, s) => a + s.stat.cost, 0);
+      const row = (s: (typeof speakers)[number]) => wrapTextWithAnsi(`${ansi(colorOf(s.meta.id), s.meta.id.padEnd(20))}${col(`$${s.stat.cost.toFixed(3)}`, 9, true)}${col(total ? `${Math.round((s.stat.cost / total) * 100)}%` : "", 6, true)}${col(`${s.stat.calls} calls`, 11, true)}${col(`${fmt(s.stat.fresh + s.stat.cached + s.stat.out)} tokens`, 15, true)}  ${dim(seatMeta(s.meta))}`, inner);
+      return frame(` cost · $${total.toFixed(3)} `, [...[...speakers].sort((a, b) => b.stat.cost - a.stat.cost).flatMap(row), ...wrapTextWithAnsi(dim("cost as the providers report it; tokens = everything billed, every call and tool step"), inner)]);
+    }
     if (openSeat === ABOUT) {
       const t = speakers.reduce((a, s) => ({ fresh: a.fresh + s.stat.fresh, cached: a.cached + s.stat.cached, out: a.out + s.stat.out, calls: a.calls + s.stat.calls, cost: a.cost + s.stat.cost }), { fresh: 0, cached: 0, out: 0, calls: 0, cost: 0 });
       const pub = events.filter((e) => PUBLIC.includes(e.kind));
@@ -244,6 +249,18 @@ export default function (pi: ExtensionAPI) {
     }
     return out + ansi(238, "░".repeat(Math.max(0, cells - filled)));
   };
+  // always full: each seat's share of the room's cost, in its color
+  const COST = "$";
+  const costBar = (cells: number, total: number) => {
+    if (!total) return ansi(238, "░".repeat(cells));
+    let out = "", filled = 0;
+    const shares = speakers.map((s) => ({ s, n: Math.floor((s.stat.cost / total) * cells) }));
+    // hand the rounding remainder to the biggest spender so the bar is always full
+    const top = shares.reduce((a, b) => (b.s.stat.cost > a.s.stat.cost ? b : a), shares[0]);
+    if (top) top.n += cells - shares.reduce((a, b) => a + b.n, 0);
+    for (const { s, n } of shares) if (n > 0) { out += ansi(colorOf(s.meta.id), "█".repeat(n)); filled += n; }
+    return out + ansi(238, "░".repeat(Math.max(0, cells - filled)));
+  };
   const setState = (id: string, state: string) => { const s = byId(id); if (s && s.stat.state !== state) { s.stat.state = state; s.stat.since = Date.now(); if (!BUSY.has(state)) s.stat.activity = undefined; } refresh(); };
   const BUSY = new Set(["thinking", "working", "replying"]);
   const elapsed = (ms: number) => { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`; };
@@ -255,9 +272,14 @@ export default function (pi: ExtensionAPI) {
     ui = ctx.ui;
     footerFactory = (_tui, theme) => ({
       dispose() {}, invalidate() {},
+      handleMouse(ev: { type: string; button: string }) {
+        if (ev.type !== "click" || ev.button !== "left") return;
+        openSeat = openSeat === COST ? null : COST; refresh();
+        return { handled: true };
+      },
       render(width: number) {
         const t = speakers.reduce((a, s) => ({ used: a.used + (s.stat.ctx ?? 0), window: a.window + (s.stat.window ?? 0), cost: a.cost + s.stat.cost, calls: a.calls + s.stat.calls }), { used: 0, window: 0, cost: 0, calls: 0 });
-        const left = theme.fg("dim", `⚒ ${speakers.length} seats · cycle ${cycleNo} · ${t.calls} calls · $${t.cost.toFixed(2)} · context ${fmt(t.used)} / ${t.window ? fmt(t.window) : "?"} `);
+        const left = theme.fg("dim", `⚒ ${speakers.length} seats · cycle ${cycleNo} · ${t.calls} calls · $${t.cost.toFixed(2)} `) + costBar(12, t.cost) + theme.fg("dim", ` · context ${fmt(t.used)} / ${t.window ? fmt(t.window) : "?"} `);
         return [truncateToWidth(left + contextBar(Math.max(10, Math.min(40, width - visibleWidth(left) - 1)), t.window), width)];
       },
     });
