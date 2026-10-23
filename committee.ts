@@ -74,7 +74,14 @@ export default function (pi: ExtensionAPI) {
     };
   };
   for (const s of cfg.speakers) if ((s.tools as unknown) === true) s.tools = "read"; // older configs stored a boolean
-  const speakers = cfg.speakers.map(makeSeat);
+  const speakers: ReturnType<typeof makeSeat>[] = [];
+  let booted = false;
+  const boot = () => {
+    if (booted) return; booted = true;
+    for (const m of cfg.speakers) speakers.push(makeSeat(m));
+    // usage events carry each call's numbers, so totals and the context bar survive a restart
+    for (const e of events) if (e.kind === "usage" && e.data) { const d = e.data as any; const st = byId(e.author)?.stat; if (st) { st.calls++; st.fresh += d.fresh ?? 0; st.cached += d.cached ?? 0; st.out += d.out ?? 0; st.cost += d.cost ?? 0; if (d.ctx) st.ctx = d.ctx; } }
+  };
   const former: Ghost[] = cfg.former ?? [];
   const byId = (id: string) => speakers.find((s) => s.meta.id === id);
   const ghostOf = (id: string) => former.find((g) => g.id === id);
@@ -133,8 +140,6 @@ export default function (pi: ExtensionAPI) {
       const e = JSON.parse(line);
       if (e.kind === "human") c++;
       record({ id: e.id, cycle: e.cycle ?? c, author: e.author, text: e.text, kind: e.kind, data: e.data });
-      // usage events carry each call's numbers, so totals and the context bar survive a restart
-      if (e.kind === "usage" && e.data) { const st = byId(e.author)?.stat; if (st) { st.calls++; st.fresh += e.data.fresh ?? 0; st.cached += e.data.cached ?? 0; st.out += e.data.out ?? 0; st.cost += e.data.cost ?? 0; if (e.data.ctx) st.ctx = e.data.ctx; } }
     }
   }
 
@@ -285,11 +290,12 @@ export default function (pi: ExtensionAPI) {
     });
     // pi starts as plain pi; the room appears on /committee on
     const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
-    ctx.ui.notify(speakers.length ? `committee: ${speakers.length} seats and ${n} messages in this folder · /committee on` : "committee: no seats in this folder yet · /committee on to set up", "info");
+    ctx.ui.notify(cfg.speakers.length ? `committee: ${cfg.speakers.length} seats and ${n} messages in this folder · /committee on` : "committee: no seats in this folder yet · /committee on to set up", "info");
   });
   // first time the room is switched on this run: check the CLIs, show the transcript, say which sessions resume
   let shown = false;
   const show = async (ctx: ExtensionContext) => {
+    boot();
     if (shown) return; shown = true;
     if (speakers.length) await checkEngines(ctx);
     for (const ev of events) if (PUBLIC.includes(ev.kind)) pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
@@ -306,7 +312,7 @@ export default function (pi: ExtensionAPI) {
   const modelsFor = async (cli: Cli): Promise<string[]> => {
     if (cli === "claude") return ["opus", "sonnet", "haiku"];
     if (cli === "codex") return codexModels(cwd).map((m: any) => m.slug).filter(Boolean);
-    if (cli === "pi") return (await run("pi", ["--list-models"])).split("\n").slice(1).map((l) => l.trim().split(/\s+/)).filter((p) => p.length > 1).map((p) => `${p[0]}/${p[1]}`);
+    if (cli === "pi") return (await run("pi", ["--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--list-models"])).split("\n").slice(1).map((l) => l.trim().split(/\s+/)).filter((p) => p.length > 1).map((p) => `${p[0]}/${p[1]}`);
     return (await run("opencode", ["models"])).split("\n").map((l) => l.trim()).filter((l) => l.includes("/"));
   };
   // combo box: fuzzy filter as you type (pi-tui's fuzzyFilter, tokens split on space and slash), arrows to move, enter picks, esc cancels.
@@ -360,7 +366,7 @@ export default function (pi: ExtensionAPI) {
     return v === undefined ? undefined : v === DEFAULT ? "" : v;
   };
   const seatsPath = join(cwd, "committee.json");
-  const saveSeats = () => { cfg.speakers = speakers.map((s) => s.meta); cfg.former = former; writeFileSync(seatsPath, JSON.stringify(cfg, null, 2) + "\n"); saveSessions(); refresh(); };
+  const saveSeats = () => { if (booted) cfg.speakers = speakers.map((s) => s.meta); cfg.former = former; writeFileSync(seatsPath, JSON.stringify(cfg, null, 2) + "\n"); saveSessions(); refresh(); };
   const seatLine = (s: Seat) => `${s.id}: ${s.cli} ${s.model}${s.thinking ? ` #${s.thinking}` : ""}${s.tools === "all" ? " ⚙⚙" : s.tools ? " ⚙" : ""}`;
   let active = false;
   let footerFactory: Parameters<ExtensionContext["ui"]["setFooter"]>[0] | undefined;
@@ -417,6 +423,7 @@ export default function (pi: ExtensionAPI) {
     return { cli, model, thinking, tools };
   };
   const addSeatFlow = async (ctx: ExtensionContext): Promise<boolean> => {
+    boot();
     const engine = await pickEngine(ctx, await installed());
     if (!engine) return false;
     const suggested = randomName();
@@ -475,6 +482,7 @@ export default function (pi: ExtensionAPI) {
         if (heldWhilePaused && !busy) { heldWhilePaused = false; await runCycles(ctx); }
         return ctx.ui.notify("resumed", "info");
       }
+      boot();
       if (args.trim().startsWith("brief")) {
         const v = args.trim().slice(5).trim();
         if (!v) return ctx.ui.notify(cfg.brief ? `brief: ${cfg.brief}` : "no brief; /committee brief <text or file path>", "info");
@@ -507,6 +515,7 @@ export default function (pi: ExtensionAPI) {
     description: "Add, remove or change a seat (cli + model + thinking); saved to committee.json",
     handler: async (_args, ctx) => {
       if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
+      boot();
       const pick = await ctx.ui.select("Seats", [...speakers.map((s) => seatLine(s.meta)), "+ add a seat"]);
       if (!pick) return;
       if (pick === "+ add a seat") { await addSeatFlow(ctx); return; }

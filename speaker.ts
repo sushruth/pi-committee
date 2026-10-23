@@ -381,7 +381,7 @@ export async function modelWindow(cli: Cli, model: string, cwd: string): Promise
     } catch { return 0; }
   }
   if (cli === "pi") {
-    const out = await new Promise<string>((res) => { const p = spawn("pi", ["--list-models"], { stdio: ["ignore", "pipe", "ignore"] }); let o = ""; p.stdout!.on("data", (d) => (o += d)); p.on("exit", () => res(o)); });
+    const out = await new Promise<string>((res) => { const p = spawn("pi", ["--no-extensions", "--no-mcp", "--no-skills", "--no-prompt-templates", "--list-models"], { stdio: ["ignore", "pipe", "ignore"] }); let o = ""; p.stdout!.on("data", (d) => (o += d)); p.on("exit", () => res(o)); });
     const [prov, ...rest] = model.split("/"); const id = rest.join("/");
     const row = out.split("\n").map((l) => l.trim().split(/\s+/)).find((p) => p[0] === prov && p[1] === id);
     const k = row?.[2] ?? ""; const n = parseFloat(k);
