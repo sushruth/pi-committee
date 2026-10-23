@@ -25,7 +25,7 @@ The room folder is the unit of state. Inside it:
 
 Commands inside pi: `/committee on|off|pause|resume|reset` (off = pi behaves normally, speakers stay alive; pause = calls in flight finish, nothing new starts, your messages are held until resume; alt+p does the same; reset = delete committee.json and committee/ in this folder, so the next `/committee on` onboards again), `/seats` (add, change model or thinking, remove), `/usage` (per-seat token table).
 
-With no `committee.json` in the folder, committee mode starts off and `/committee on` runs onboarding: detected CLIs, then per seat a CLI, a model from the live list, a thinking level, a name (a random adverb-adjective is offered) and an optional persona. The persona is free text or a path to a file (relative to the room folder, or `~`), read when the seat's first packet is built. It is set only at creation; to change it, remove the seat and add it again.
+pi starts as plain pi in every folder; `/committee on` shows the room (replaying the transcript and resuming sessions) and routes your input to it. With no `committee.json` in the folder, `/committee on` runs onboarding: detected CLIs, then per seat a CLI, a model from the live list, a thinking level, a name (a random adverb-adjective is offered) and an optional persona. The persona is free text or a path to a file (relative to the room folder, or `~`), read when the seat's first packet is built. It is set only at creation; to change it, remove the seat and add it again.
 
 A removed seat (via `/seats`, or dropped at startup) becomes a ghost: a pale dot in the status row, its lines kept in the transcript, listed to the others as former so nobody addresses it.
 

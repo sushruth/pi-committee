@@ -283,14 +283,19 @@ export default function (pi: ExtensionAPI) {
         return [truncateToWidth(left + contextBar(Math.max(10, Math.min(40, width - visibleWidth(left) - 1)), t.window), width)];
       },
     });
+    // pi starts as plain pi; the room appears on /committee on
+    const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
+    ctx.ui.notify(speakers.length ? `committee: ${speakers.length} seats and ${n} messages in this folder · /committee on` : "committee: no seats in this folder yet · /committee on to set up", "info");
+  });
+  // first time the room is switched on this run: check the CLIs, show the transcript, say which sessions resume
+  let shown = false;
+  const show = async (ctx: ExtensionContext) => {
+    if (shown) return; shown = true;
     if (speakers.length) await checkEngines(ctx);
-    applyMode(ctx);
     for (const ev of events) if (PUBLIC.includes(ev.kind)) pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
     const resumed = speakers.filter((s) => s.sent > 0).map((s) => s.meta.id);
-    if (!speakers.length) ctx.ui.notify("committee: no seats in this folder yet · /committee on to set up", "info");
     if (events.length) ctx.ui.notify(`replayed ${events.filter((e) => PUBLIC.includes(e.kind)).length} messages; resuming sessions for ${resumed.length ? resumed.join(", ") : "nobody"}`, "info");
-    refresh();
-  });
+  };
 
   pi.registerCommand("usage", {
     description: "Toggle the per-speaker token usage table above the editor",
@@ -357,7 +362,7 @@ export default function (pi: ExtensionAPI) {
   const seatsPath = join(cwd, "committee.json");
   const saveSeats = () => { cfg.speakers = speakers.map((s) => s.meta); cfg.former = former; writeFileSync(seatsPath, JSON.stringify(cfg, null, 2) + "\n"); saveSessions(); refresh(); };
   const seatLine = (s: Seat) => `${s.id}: ${s.cli} ${s.model}${s.thinking ? ` #${s.thinking}` : ""}${s.tools === "all" ? " ⚙⚙" : s.tools ? " ⚙" : ""}`;
-  let active = speakers.length > 0;
+  let active = false;
   let footerFactory: Parameters<ExtensionContext["ui"]["setFooter"]>[0] | undefined;
   const applyMode = (ctx: ExtensionContext) => {
     if (active) { ctx.ui.setFooter(footerFactory); refresh(); ctx.ui.setStatus("committee", "idle"); }
@@ -492,6 +497,7 @@ export default function (pi: ExtensionAPI) {
       const want = args.trim() === "on" ? true : args.trim() === "off" ? false : !active;
       if (busy && !want) return ctx.ui.notify("wait for the committee to settle first", "warning");
       if (want && speakers.length === 0 && !(await onboarding(ctx))) return ctx.ui.notify("no seats, committee stays off", "warning");
+      if (want) await show(ctx);
       active = want; applyMode(ctx);
       ctx.ui.notify(`committee mode ${active ? "on" : "off"}`, "info");
     },

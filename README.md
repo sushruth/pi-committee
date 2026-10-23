@@ -14,8 +14,8 @@ pi install https://github.com/sushruth/pi-committee
 ## Start a room
 
 1. Open a terminal in any folder. That folder becomes the room.
-2. Run `pi`.
-3. Type `/committee on`.
+2. Run `pi`. pi starts as plain pi; the room stays hidden until you ask for it.
+3. Type `/committee on`. In a folder that already has a room, this shows the transcript and resumes every seat.
 4. Setup asks you, for each seat: which CLI runs it, which model, which thinking level, which tools (none, read-only, or all), a name, and an optional persona. Setup suggests a random name such as `quietly-excellent`.
 5. Type a message. The extension sends your message to every seat.
 
