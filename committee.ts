@@ -80,7 +80,7 @@ export default function (pi: ExtensionAPI) {
     if (booted) return; booted = true;
     for (const m of cfg.speakers) speakers.push(makeSeat(m));
     // usage events carry each call's numbers, so totals and the context bar survive a restart
-    for (const e of events) if (e.kind === "usage" && e.data) { const d = e.data as any; const st = byId(e.author)?.stat; if (st) { st.calls++; st.fresh += d.fresh ?? 0; st.cached += d.cached ?? 0; st.out += d.out ?? 0; st.cost += d.cost ?? 0; if (d.ctx) st.ctx = d.ctx; } }
+    for (const e of events) if (e.kind === "usage" && e.data) { const d = e.data as any; const st = byId(e.author)?.stat; if (st) { st.calls++; st.fresh += d.fresh ?? 0; st.cached += d.cached ?? 0; st.out += d.out ?? 0; st.cost += d.cost ?? 0; if (typeof d.ctx === "number") st.ctx = d.ctx; } }
   };
   const former: Ghost[] = cfg.former ?? [];
   const byId = (id: string) => speakers.find((s) => s.meta.id === id);
@@ -153,7 +153,7 @@ export default function (pi: ExtensionAPI) {
     const s = byId(r.speaker); if (!s) return;
     s.stat.calls++;
     if (r.usage) { s.stat.fresh += r.usage.fresh; s.stat.cached += r.usage.cached; s.stat.out += r.usage.out; s.stat.cost += r.usage.cost ?? 0;
-      if (r.usage.ctx) s.stat.ctx = r.usage.ctx; }
+      if (typeof r.usage.ctx === "number") s.stat.ctx = r.usage.ctx; }
     publish({ author: r.speaker, kind: "usage", text: `${phase}: fresh ${r.usage?.fresh ?? "?"} cached ${r.usage?.cached ?? "?"} out ${r.usage?.out ?? "?"}${r.usage?.cost != null ? ` $${r.usage.cost.toFixed(4)}` : ""}${r.resumed ? " (resumed)" : ""}`, data: { phase, ...r.usage, resumed: r.resumed, ok: r.ok } });
   };
 
@@ -180,6 +180,8 @@ export default function (pi: ExtensionAPI) {
   const statusLines = () => [LOGO() + cells().map((c) => c.text).join(SEP)];
   // panel for the clicked seat: full identity in the title, then state, last intention, last reply;
   // its bottom border opens over that seat's dot so the two read as one piece
+  // Latest provider-reported input context, not cumulative tokens billed across calls.
+  const contextUsage = (st: Stat) => `${st.ctx == null ? "?" : fmt(st.ctx)} / ${st.window ? fmt(st.window) : "?"}${st.ctx != null && st.window ? ` (${Math.round(st.ctx / st.window * 100)}%)` : ""}`;
   const detailLines = (width: number) => {
     const inner = Math.max(20, width - 4);
     const dim = (t: string) => ansi(244, t);
@@ -191,7 +193,7 @@ export default function (pi: ExtensionAPI) {
     };
     if (openSeat === COST) {
       const total = speakers.reduce((a, s) => a + s.stat.cost, 0);
-      const row = (s: (typeof speakers)[number]) => wrapTextWithAnsi(`${ansi(colorOf(s.meta.id), s.meta.id.padEnd(20))}${col(`$${s.stat.cost.toFixed(3)}`, 9, true)}${col(total ? `${Math.round((s.stat.cost / total) * 100)}%` : "", 6, true)}${col(`${s.stat.calls} calls`, 11, true)}${col(`${fmt(s.stat.fresh + s.stat.cached + s.stat.out)} tokens`, 15, true)}  ${dim(seatMeta(s.meta))}`, inner);
+      const row = (s: (typeof speakers)[number]) => wrapTextWithAnsi(`${ansi(colorOf(s.meta.id), s.meta.id.padEnd(20))}${col(`$${s.stat.cost.toFixed(3)}`, 9, true)}${col(total ? `${Math.round((s.stat.cost / total) * 100)}%` : "", 6, true)}${col(`${s.stat.calls} calls`, 11, true)}${col(`ctx ${contextUsage(s.stat)}`, 25, true)}  ${dim(seatMeta(s.meta))}`, inner);
       const phases = new Map<string, { cost: number; calls: number; reported: number }>();
       for (const ev of events) {
         if (ev.kind !== "usage" || !byId(ev.author)) continue;
@@ -204,12 +206,12 @@ export default function (pi: ExtensionAPI) {
       }
       const seatRows = [...speakers].sort((a, b) => b.stat.cost - a.stat.cost).flatMap((s) => [
         ...row(s),
-        ...wrapTextWithAnsi(dim(`  tokens: ${fmt(s.stat.fresh)} fresh input · ${fmt(s.stat.cached)} cached input · ${fmt(s.stat.out)} output`), inner),
+        ...wrapTextWithAnsi(dim(`  cumulative billed tokens: ${fmt(s.stat.fresh)} fresh input · ${fmt(s.stat.cached)} cached input · ${fmt(s.stat.out)} output`), inner),
       ]);
       const phaseRows = [...phases].flatMap(([phase, entry]) => wrapTextWithAnsi(
         `${phase}: $${entry.cost.toFixed(4)} · ${entry.calls} calls · cost reported for ${entry.reported}/${entry.calls}`, inner));
       return frame(` cost · $${total.toFixed(3)} `, [...seatRows, ...phaseRows,
-        ...wrapTextWithAnsi(dim("cost as the providers report it; missing costs are excluded, not known to be free. Token counts are not a dollar-price breakdown."), inner)]);
+        ...wrapTextWithAnsi(dim("cost as the providers report it; missing costs are excluded, not known to be free. Context = latest reported input / window, not a live meter. Billed tokens accumulate across calls; they are not a dollar-price breakdown."), inner)]);
     }
     if (openSeat === ABOUT) {
       const t = speakers.reduce((a, s) => ({ fresh: a.fresh + s.stat.fresh, cached: a.cached + s.stat.cached, out: a.out + s.stat.out, calls: a.calls + s.stat.calls, cost: a.cost + s.stat.cost }), { fresh: 0, cached: 0, out: 0, calls: 0, cost: 0 });
@@ -220,7 +222,7 @@ export default function (pi: ExtensionAPI) {
         ...row("room", cwd),
         ...row("seats", `${speakers.length} live${former.length ? `, ${former.length} former` : ""} · ${cfg.etiquette}`),
         ...row("so far", `cycle ${cycleNo} · ${pub.length} messages · ${t.calls} calls`),
-        ...row("tokens", `${fmt(t.fresh + t.cached + t.out)} billed in total (every call, every tool step, in and out)`),
+        ...speakers.flatMap((s) => row("context", `${s.meta.id}: ${contextUsage(s.stat)}`)),
         ...row("cost", t.cost ? `$${t.cost.toFixed(3)} (providers that report it)` : "not reported by these providers"),
         ...row("source", "github.com/sushruth/pi-committee · /committee · /seats · /usage"),
       ]);
@@ -260,9 +262,8 @@ export default function (pi: ExtensionAPI) {
     const short = (s: (typeof speakers)[number]) => `${s.meta.cli}:${s.meta.model.split("/").pop()}`;
     const modelW = Math.min(24, Math.max(...speakers.map((s) => short(s).length)));
     const dim = (t: string) => ansi(244, t);
-    const spend = (s: (typeof speakers)[number]) => s.stat.fresh + s.stat.cached + s.stat.out;
-    const header = `${col("", idW)} ${col(dim("cli/model"), modelW)} ${col(dim("calls"), 6, true)} ${col(dim("tokens"), 9, true)} ${col(dim("context"), 13, true)} ${col(dim("$"), 8, true)}  ${dim("state")}`;
-    const rows = speakers.map((s) => `${col(tag(s.meta.id), idW)} ${col(dim(truncateToWidth(short(s), modelW)), modelW)} ${col(String(s.stat.calls), 6, true)} ${col(fmt(spend(s)), 9, true)} ${col((s.stat.ctx ? fmt(s.stat.ctx) : "?") + dim("/" + (s.stat.window ? fmt(s.stat.window) : "?")), 13, true)} ${col(s.stat.cost ? s.stat.cost.toFixed(3) : dim("n/a"), 8, true)}  ${ansi(stateColor(s.stat.state), `${glyph(s.stat.state)} ${s.stat.state}`)}`);
+    const header = `${col("", idW)} ${col(dim("cli/model"), modelW)} ${col(dim("calls"), 6, true)} ${col(dim("context / window"), 25, true)} ${col(dim("$"), 8, true)}  ${dim("state")}`;
+    const rows = speakers.map((s) => `${col(tag(s.meta.id), idW)} ${col(dim(truncateToWidth(short(s), modelW)), modelW)} ${col(String(s.stat.calls), 6, true)} ${col(contextUsage(s.stat), 25, true)} ${col(s.stat.cost ? s.stat.cost.toFixed(3) : dim("n/a"), 8, true)}  ${ansi(stateColor(s.stat.state), `${glyph(s.stat.state)} ${s.stat.state}`)}`);
     widgetTui = undefined;
     ui?.setWidget("committee", [header, ...rows]);
   };
