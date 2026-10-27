@@ -325,6 +325,7 @@ export default function (pi: ExtensionAPI) {
     return true;
   };
 
+  pi.registerFlag("committee", { description: "start with committee mode on (resumes this folder's room)", type: "boolean", default: false });
   pi.on("session_start", async (_e, ctx) => {
     ui = ctx.ui;
     footerFactory = (_tui, theme) => ({
@@ -340,6 +341,7 @@ export default function (pi: ExtensionAPI) {
         return [truncateToWidth(left + contextBar(Math.max(10, Math.min(40, width - visibleWidth(left) - 1)), t.window), width)];
       },
     });
+    if (pi.getFlag("committee") === true) { await enableMode(ctx); return; } // `pi --committee` resumes the room without a click
     // pi starts as plain pi; a folder that has a committee gets the clickable hint instead of a toast
     if (showHint(ctx)) return;
     ctx.ui.notify(cfg.speakers.length ? "committee: /committee on to turn it on" : "committee: no seats in this folder yet · /committee on to set up", "info");
