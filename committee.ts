@@ -99,6 +99,11 @@ export default function (pi: ExtensionAPI) {
     former.push({ id: s.meta.id, cli: s.meta.cli, model: s.meta.model, thinking: s.meta.thinking, left: last?.id ?? "event-0" });
   };
   let busy = false;
+  /** messages typed while a cycle is running; they are logged only when delivered, never before */
+  const queued: string[] = [];
+  // one dim line per waiting message, in pi's own vocabulary, above the editor
+  const drawQueue = (ctx: ExtensionContext) =>
+    ctx.ui.setWidget("committee-queue", queued.length ? queued.map((t, i) => `⏳ queued ${i + 1}: ${t}`) : undefined, { placement: "aboveEditor" });
   let paused = false;
   let heldWhilePaused = false;
   const saveSessions = () => {
@@ -187,7 +192,24 @@ export default function (pi: ExtensionAPI) {
     if (openSeat === COST) {
       const total = speakers.reduce((a, s) => a + s.stat.cost, 0);
       const row = (s: (typeof speakers)[number]) => wrapTextWithAnsi(`${ansi(colorOf(s.meta.id), s.meta.id.padEnd(20))}${col(`$${s.stat.cost.toFixed(3)}`, 9, true)}${col(total ? `${Math.round((s.stat.cost / total) * 100)}%` : "", 6, true)}${col(`${s.stat.calls} calls`, 11, true)}${col(`${fmt(s.stat.fresh + s.stat.cached + s.stat.out)} tokens`, 15, true)}  ${dim(seatMeta(s.meta))}`, inner);
-      return frame(` cost · $${total.toFixed(3)} `, [...[...speakers].sort((a, b) => b.stat.cost - a.stat.cost).flatMap(row), ...wrapTextWithAnsi(dim("cost as the providers report it; tokens = everything billed, every call and tool step"), inner)]);
+      const phases = new Map<string, { cost: number; calls: number; reported: number }>();
+      for (const ev of events) {
+        if (ev.kind !== "usage" || !byId(ev.author)) continue;
+        const usage = ev.data as { phase?: string; cost?: number } | undefined;
+        const phase = usage?.phase ?? "other";
+        const entry = phases.get(phase) ?? { cost: 0, calls: 0, reported: 0 };
+        entry.calls++;
+        if (typeof usage?.cost === "number" && Number.isFinite(usage.cost)) { entry.cost += usage.cost; entry.reported++; }
+        phases.set(phase, entry);
+      }
+      const seatRows = [...speakers].sort((a, b) => b.stat.cost - a.stat.cost).flatMap((s) => [
+        ...row(s),
+        ...wrapTextWithAnsi(dim(`  tokens: ${fmt(s.stat.fresh)} fresh input · ${fmt(s.stat.cached)} cached input · ${fmt(s.stat.out)} output`), inner),
+      ]);
+      const phaseRows = [...phases].flatMap(([phase, entry]) => wrapTextWithAnsi(
+        `${phase}: $${entry.cost.toFixed(4)} · ${entry.calls} calls · cost reported for ${entry.reported}/${entry.calls}`, inner));
+      return frame(` cost · $${total.toFixed(3)} `, [...seatRows, ...phaseRows,
+        ...wrapTextWithAnsi(dim("cost as the providers report it; missing costs are excluded, not known to be free. Token counts are not a dollar-price breakdown."), inner)]);
     }
     if (openSeat === ABOUT) {
       const t = speakers.reduce((a, s) => ({ fresh: a.fresh + s.stat.fresh, cached: a.cached + s.stat.cached, out: a.out + s.stat.out, calls: a.calls + s.stat.calls, cost: a.cost + s.stat.cost }), { fresh: 0, cached: 0, out: 0, calls: 0, cost: 0 });
@@ -273,6 +295,35 @@ export default function (pi: ExtensionAPI) {
   let ticker: ReturnType<typeof setInterval> | undefined;
   const tick = () => { const anyBusy = speakers.some((s) => BUSY.has(s.stat.state)); if (anyBusy && !ticker) ticker = setInterval(() => widgetTui?.requestRender(), 1000); if (!anyBusy && ticker) { clearInterval(ticker); ticker = undefined; } };
 
+  // ---- a folder that already has a committee gets one clickable line above the editor
+  // instead of a toast you can miss. ✕ remembers "not now" in committee/ui.json (gitignored with
+  // the rest of committee/); the flag is only read here, never written to the shared committee.json.
+  const hintPath = join(dir, "ui.json");
+  const hintDismissed = () => { try { const j = JSON.parse(readFileSync(hintPath, "utf8")); return j.dismissed === true || j.hintDismissed === true; } catch { return false; } };
+  // turning the room on, shared by /committee on and the hint's click
+  let enableMode: (ctx: ExtensionContext) => Promise<void> = async () => {};
+  const showHint = (ctx: ExtensionContext) => {
+    if (!existsSync(cfgPath) || hintDismissed()) return false;
+    const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
+    const label = `⚒ committee used here · ${cfg.speakers.length} seats, ${n} msgs — click to turn on`;
+    const clear = () => ctx.ui.setWidget("committee-hint", undefined);
+    ctx.ui.setWidget("committee-hint", (_tui, theme) => ({
+      dispose() {}, invalidate() {},
+      handleMouse(ev: { type: string; button: string; x: number; width: number }) {
+        if (ev.type !== "click" || ev.button !== "left") return;
+        clear();
+        if (ev.x >= ev.width - 2) { try { writeFileSync(hintPath, JSON.stringify({ dismissed: true }, null, 2)); } catch {} return { handled: true }; }
+        void enableMode(ctx);
+        return { handled: true };
+      },
+      render(width: number) {
+        const room = Math.max(0, width - visibleWidth(label) - 2);
+        return [truncateToWidth(theme.fg("dim", label) + " ".repeat(room) + theme.fg("dim", "✕"), width)];
+      },
+    }), { placement: "aboveEditor" });
+    return true;
+  };
+
   pi.on("session_start", async (_e, ctx) => {
     ui = ctx.ui;
     footerFactory = (_tui, theme) => ({
@@ -288,9 +339,9 @@ export default function (pi: ExtensionAPI) {
         return [truncateToWidth(left + contextBar(Math.max(10, Math.min(40, width - visibleWidth(left) - 1)), t.window), width)];
       },
     });
-    // pi starts as plain pi; the room appears on /committee on
-    const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
-    ctx.ui.notify(cfg.speakers.length ? `committee: ${cfg.speakers.length} seats and ${n} messages in this folder · /committee on` : "committee: no seats in this folder yet · /committee on to set up", "info");
+    // pi starts as plain pi; a folder that has a committee gets the clickable hint instead of a toast
+    if (showHint(ctx)) return;
+    ctx.ui.notify(cfg.speakers.length ? "committee: /committee on to turn it on" : "committee: no seats in this folder yet · /committee on to set up", "info");
   });
   // first time the room is switched on this run: check the CLIs, show the transcript, say which sessions resume
   let shown = false;
@@ -302,6 +353,23 @@ export default function (pi: ExtensionAPI) {
     const resumed = speakers.filter((s) => s.sent > 0).map((s) => s.meta.id);
     if (events.length) ctx.ui.notify(`replayed ${events.filter((e) => PUBLIC.includes(e.kind)).length} messages; resuming sessions for ${resumed.length ? resumed.join(", ") : "nobody"}`, "info");
   };
+
+  pi.registerCommand("queue", {
+    description: "List messages waiting for the room to settle; /queue drop <n> cancels one, /queue clear drops them all",
+    handler: async (args, ctx) => {
+      const a = (args ?? "").trim();
+      if (!queued.length) return ctx.ui.notify("queue empty", "info");
+      if (a === "clear") { const n = queued.length; queued.length = 0; drawQueue(ctx); return ctx.ui.notify(`dropped ${n} queued`, "info"); }
+      const drop = a.match(/^drop\s+(\d+)$/);
+      if (drop) {
+        const i = Number(drop[1]) - 1;
+        if (i < 0 || i >= queued.length) return ctx.ui.notify(`no message ${drop[1]}; queue has ${queued.length}`, "warning");
+        const [gone] = queued.splice(i, 1); drawQueue(ctx);
+        return ctx.ui.notify(`dropped: ${gone.slice(0, 60)}`, "info");
+      }
+      ctx.ui.notify(queued.map((t, i) => `${i + 1}. ${t.slice(0, 80)}`).join("\n"), "info");
+    },
+  });
 
   pi.registerCommand("usage", {
     description: "Toggle the per-speaker token usage table above the editor",
@@ -371,8 +439,15 @@ export default function (pi: ExtensionAPI) {
   let active = false;
   let footerFactory: Parameters<ExtensionContext["ui"]["setFooter"]>[0] | undefined;
   const applyMode = (ctx: ExtensionContext) => {
-    if (active) { ctx.ui.setFooter(footerFactory); refresh(); ctx.ui.setStatus("committee", "idle"); }
+    if (active) { ctx.ui.setWidget("committee-hint", undefined); ctx.ui.setFooter(footerFactory); refresh(); ctx.ui.setStatus("committee", "idle"); }
     else { ctx.ui.setFooter(undefined); widgetTui = undefined; ctx.ui.setWidget("committee", undefined); ctx.ui.setStatus("committee", undefined); }
+  };
+  // one path for turning the room on: /committee on, and a click on the hint
+  enableMode = async (ctx: ExtensionContext) => {
+    if (!active && speakers.length === 0 && !(await onboarding(ctx))) return ctx.ui.notify("no seats, committee stays off", "warning");
+    await show(ctx);
+    active = true; applyMode(ctx);
+    ctx.ui.notify("committee mode on", "info");
   };
   // ---- onboarding: which CLIs exist, which are worth using, then one seat at a time
   const CLI_NOTE: Record<Cli, string> = {
@@ -504,10 +579,9 @@ export default function (pi: ExtensionAPI) {
       }
       const want = args.trim() === "on" ? true : args.trim() === "off" ? false : !active;
       if (busy && !want) return ctx.ui.notify("wait for the committee to settle first", "warning");
-      if (want && speakers.length === 0 && !(await onboarding(ctx))) return ctx.ui.notify("no seats, committee stays off", "warning");
-      if (want) await show(ctx);
-      active = want; applyMode(ctx);
-      ctx.ui.notify(`committee mode ${active ? "on" : "off"}`, "info");
+      if (want) return enableMode(ctx);
+      active = false; applyMode(ctx);
+      ctx.ui.notify("committee mode off", "info");
     },
   });
 
@@ -646,7 +720,14 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
 
   pi.on("input", async (event, ctx) => {
     if (!active || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
-    if (busy) { ctx.ui.notify("committee still settling, wait a moment", "warning"); return { action: "handled" }; }
+    // typed while the room is mid-cycle: hold the text back until the cycle settles, so a seat can
+    // never read it before the queue clears. the status line is the visible "in queue" state.
+    if (busy) {
+      queued.push(event.text); drawQueue(ctx);
+      ctx.ui.setStatus("committee", `settling · ${queued.length} queued`);
+      ctx.ui.notify(`queued (${queued.length}): sent when this cycle settles · /queue lists, /queue drop N cancels`, "info");
+      return { action: "handled" };
+    }
     cycleNo++;
     publish({ author: "you", kind: "human", text: event.text });
     if (paused) { heldWhilePaused = true; ctx.ui.notify("paused: logged, nobody answers until /committee resume", "warning"); return { action: "handled" }; }
@@ -657,10 +738,16 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     busy = true;
     try {
       let n = 0;
-      do { ctx.ui.setStatus("committee", `cycle ${++n}`); } while (!paused && (await cycle()) > 0);
+      do { ctx.ui.setStatus("committee", `cycle ${++n}${queued.length ? ` · ${queued.length} queued` : ""}`); } while (!paused && (await cycle()) > 0);
       ctx.ui.setStatus("committee", paused ? "paused" : "idle");
       refresh();
     } finally { busy = false; }
+    // anything typed while the room was working is published now, at the boundary, then read in one pass
+    if (queued.length && !paused) {
+      for (const text of queued.splice(0)) { cycleNo++; publish({ author: "you", kind: "human", text }); }
+      drawQueue(ctx);
+      await runCycles(ctx);
+    }
   }
 
   pi.on("session_shutdown", async () => { if (ticker) clearInterval(ticker); saveSessions(); for (const s of speakers) s.session.close(); });
