@@ -861,7 +861,14 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         });
     }));
     if (!roomGen.accepts(roundTok)) return 0; // the room changed while seats were thinking
-    const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${JSON.stringify(r.payload)}`).join("\n");
+    // Intentions carry a one-line topic. A seat that pastes its whole answer into the poll must not
+    // have it shown to the room: the others then defer to a reply that was never published.
+    const intentionLine = (p: any) => {
+      const kind = [p?.preference, p?.intent].filter(Boolean).join("/");
+      const topic = String(p?.topic ?? "").slice(0, 160);
+      return `${kind}: ${topic}${p?.tool ? ` ⚙ ${p.tool}` : ""}`;
+    };
+    const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${intentionLine(r.payload)}`).join("\n");
     if (!only) {
       publish({ author: "host", kind: "intention", text: summary });
       for (const r of intents) if (!r.ok) { diag(r, "intention"); publish({ author: r.speaker, kind: "error", text: `intention failed: ${r.error}` }); }
