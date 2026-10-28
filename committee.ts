@@ -126,6 +126,20 @@ export default function (pi: ExtensionAPI) {
   const palette = [39, 208, 141, 42, 213, 220, 51, 203];
   const colorOf = (id: string) => ghostOf(id) ? 240 : palette[Math.max(0, speakers.findIndex((s) => s.meta.id === id)) % palette.length];
   const tag = (id: string) => ansi(colorOf(id), `● ${id}`);
+  // shorthand tags: initials of the id (simply-precise -> @sp); a clash with an earlier seat falls back to a longer form
+  const tagOf = (id: string): string => {
+    const taken = new Set<string>();
+    for (const x of speakers) {
+      const parts = x.meta.id.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      const ini = parts.map((q) => q[0]).join("");
+      const pick = [ini, (parts[0]?.slice(0, 2) ?? "") + ini.slice(1), x.meta.id.toLowerCase()].find((c) => c && !taken.has(c)) ?? x.meta.id.toLowerCase();
+      taken.add(pick);
+      if (x.meta.id === id) return pick;
+    }
+    return id.toLowerCase();
+  };
+  // color @tags in transcript text with the tagged seat's identity color
+  const highlightTags = (t: string) => t.replace(/@([a-z0-9]+)\b/g, (m, k) => { const x = speakers.find((q) => tagOf(q.meta.id) === k); return x ? ansi(colorOf(x.meta.id), m) : m; });
   const stateColor = (st: string) => st.startsWith("err") ? 196 : st === "thinking" ? 220 : st === "working" || st === "replying" ? 214 : st === "spoke" ? 42 : st === "idle" ? 244 : 250;
   const glyph = (st: string) => st === "idle" ? "·" : st.startsWith("err") ? "✗" : st === "thinking" ? "◌" : st === "working" ? "⚙" : st === "replying" ? "●" : st === "spoke" ? "✓" : "○";
   const fmt = (n: number) => (n < 1000 ? `${n}` : n < 1_000_000 ? `${(n / 1000).toFixed(1)}k` : `${(n / 1_000_000).toFixed(2)}M`);
@@ -634,7 +648,7 @@ export default function (pi: ExtensionAPI) {
       render(width: number) {
         const pad = " ".repeat(outputPad);
         const bar = ansi(color, "▏");
-        const body = wrapTextWithAnsi(d.kind === "tool" ? ansi(244, message.content) : message.content, Math.max(20, width - outputPad - 2));
+        const body = wrapTextWithAnsi(d.kind === "tool" ? ansi(244, message.content) : highlightTags(message.content), Math.max(20, width - outputPad - 2));
         const seat = d.kind === "human" || d.kind === "tool" ? undefined : byId(d.author)?.meta ?? ghostOf(d.author);
         const w = (d.data as any)?.tools as { calls: number; chars: number } | undefined;
         // name on the left, cli:model #thinking (and the tool-work marker) right-aligned on the same line
@@ -648,10 +662,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---- packets: preamble + rules + full transcript once per session, then only the delta
-  const roster = () => speakers.map(({ meta: s }) => { const p = personaOf(s); return `- ${s.id} (${s.cli} ${s.model}${s.tools === "all" ? ", has full tools" : s.tools ? ", has read-only tools" : ""})${p ? `: ${p}` : ""}`; }).join("\n")
+  const roster = () => speakers.map(({ meta: s }) => { const p = personaOf(s); return `- ${s.id} [@${tagOf(s.id)}] (${s.cli} ${s.model}${s.tools === "all" ? ", has full tools" : s.tools ? ", has read-only tools" : ""})${p ? `: ${p}` : ""}`; }).join("\n")
     + (former.length ? `\nFormer, no longer in the room (do not address them): ${former.map((g) => `${g.id} (left after ${g.left})`).join(", ")}` : "");
   const ledger = () => speakers.map((s) => `${s.meta.id} ${s.stat.turns}x${s.stat.lastSpoke ? `@c${s.stat.lastSpoke}` : ""}`).join(", ") + `; floor: ${floorHolder ?? "nobody"}`;
   const rules = `Floor rules (self-governed, nobody schedules turns): normally one speaker per cycle. Speak only when you add something the others' intentions do not cover. Defer to speakers who have spoken less. Whoever last held the floor may keep it to finish a thought. If several speak at once, fine; do not re-litigate, just be brief. Only what appears in the transcript was said; never cite an intention as if it were spoken. Contributions are at most 120 words unless your intention said length "long". If you ever have tools, keep their output short: ask for the smallest result that answers the question, since everything you bring back is read by the whole room.
+When you refer to another seat, use its shorthand tag from the roster (for example @sp), not its full id; the transcript colors each tag in that seat\'s color. Humans use the same tags to address a seat.
 A human message never goes unanswered: if nobody has anything new to add, whoever answered the human most recently responds with action "repeat" and the event id of that earlier reply in ref, so it is shown again instead of silence.
 Tools: some seats have tools in the room folder, read-only (read files, grep, glob, a shell for inspection) or full (editing and commands too). Your tool work is yours alone: the room never sees your calls or their output, only your reply. So whatever you found or did goes into the reply, with the numbers, paths and results the others need; a reply that says "I checked" without them is wasted work. Nobody tells you where you are: the first time a question needs the code or data, orient yourself (list the room folder, read a README or AGENTS file, find what the question is about) and say in one line what you found so the others need not. Work is divided through intentions: say in the "tool" field what work you would do, one line; if another seat's intention names the same work and it has spoken less, leave it to them and take a different part. Measure before proposing. Tools are off during the intention phase; the work happens in the respond phase, when you actually speak. Plan and report by default; create, change or delete things only when the human asked for that, and only seats with full tools can.
 Two phases, always as JSON: "intention" (do you have something to add; topic is one sentence under 20 words), then "respond" (you see everyone's intentions and either hold, with action wait or silent, respond, with action speak and the contribution in text, or re-show an earlier reply of yours, with action repeat and its event id in ref).`;
