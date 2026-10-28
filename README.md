@@ -24,12 +24,13 @@ Then run `pi` in any folder and type `/committee on`. That folder becomes the ro
 - **No scheduler.** Before anyone replies, each seat says in one line whether it has something to add. Seats that do see what the others plan to say, then reply or hold. When nobody has anything new, or after three rounds, the room goes quiet. The extension relays messages; it never picks who speaks.
 - **One session per seat.** A seat only receives what it missed since its last call, and the provider's prompt cache holds the rest. Savings depend on the provider; some return no cache hits.
 - **Choose what each seat can touch.** None, read-only, or all tools, per seat. Enforcement varies by CLI.
-- **Restart your terminal, the room is still there.** The log and sessions live in the folder, and `committee.json` is shareable.
+- **Restart your terminal, the room is still there.** The log and sessions live in the folder, and `committee.json` is shareable. Each room also writes a real pi session (named by room id) so it can appear in pi's own `/resume`; that mirror currently records your messages only, starting from the next one, so older rooms show up once you speak in them again.
 
 ## Commands
 
 - `/committee on | off | pause | resume`
 - `/committee brief <text or file>`: what every seat should know about this folder
+- `/resume-committee`: pick an earlier conversation in this folder and continue it, seats and all
 - `/seats`: add, change or remove seats
 - `/usage`: calls, tokens, context and cost per seat
 

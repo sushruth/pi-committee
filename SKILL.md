@@ -23,6 +23,8 @@ The room folder is the unit of state. Inside it:
 - `committee/diag.jsonl`: raw provider output for failed calls.
 - `committee/codex-home/`: a private `CODEX_HOME` for codex seats: the auth file and a `config.toml` rewritten on every start that turns off skills, plugins, apps, web search, the shell and the optional prompt sections.
 
+`/resume-committee` picks an archived room and continues it (also reachable as `/committee sessions`); `/committee on` still restores whatever room this pi session was bound to. Each room also mirrors its human messages into a real pi session file named by room id, so a room can be listed in pi's native `/resume`; seat replies are not mirrored and earlier history is not backfilled.
+
 Commands inside pi: `/committee on|off|pause|resume|reset` (off = pi behaves normally, speakers stay alive; pause = calls in flight finish, nothing new starts, your messages are held until resume; alt+p does the same; reset = delete committee.json and committee/ in this folder, so the next `/committee on` onboards again), `/seats` (add, change model or thinking, remove), `/usage` (per-seat token table).
 
 pi starts as plain pi in every folder; `/committee on` shows the room (replaying the transcript and resuming sessions) and routes your input to it. With no `committee.json` in the folder, `/committee on` runs onboarding: detected CLIs, then per seat a CLI, a model from the live list, a thinking level, a name (a random adverb-adjective is offered) and an optional persona. The persona is free text or a path to a file (relative to the room folder, or `~`), read when the seat's first packet is built. It is set only at creation; to change it, remove the seat and add it again.
