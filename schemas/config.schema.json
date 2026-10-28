@@ -51,6 +51,11 @@
     "timeoutSeconds": {
       "type": "integer",
       "minimum": 1
+    },
+    "maxRounds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Autonomous rounds per human message before the room stops on its own (default 3)."
     }
   },
   "required": [

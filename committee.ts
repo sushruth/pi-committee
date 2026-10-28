@@ -30,6 +30,8 @@ interface Config {
   /** what every seat should know about this folder: text, or a path to a file (relative to the room, or ~) */
   brief?: string;
   timeoutSeconds?: number;
+  /** autonomous rounds per human message before the room stops on its own (default 3) */
+  maxRounds?: number;
   /** per call, for seats with tools (default 600) */
   toolTimeoutSeconds?: number;
 }
@@ -71,6 +73,8 @@ export default function (pi: ExtensionAPI) {
       session: new Speaker({ id: meta.id, cli: meta.cli, model: meta.model, thinking: meta.thinking, cwd, session_id: match ? prev.session_id : undefined, tools: meta.tools, onActivity: (t) => { const st = byId(meta.id)?.stat; if (st) { st.activity = t ?? undefined; refresh(); } } }),
       sent: match ? prev.sent : 0,
       rulesSeen: match ? prev.rules : undefined,
+      /** public transcript size when this seat was last polled; an unchanged size means nothing new to ask about */
+      polledAt: undefined as number | undefined,
       stat: { state: "idle", since: Date.now(), fresh: 0, cached: 0, out: 0, cost: 0, calls: 0, turns: 0, lastSpoke: 0 } as Stat,
     };
   };
@@ -693,10 +697,18 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   async function cycle() {
     cycleNo++;
     for (const s of speakers) setState(s.meta.id, "thinking");
-    const intents = await Promise.all(speakers.map((s) =>
-      s.session.send(packet(s, "intention", ""), intentionSchema, timeoutMs, { noTools: true })
-        .then((r) => { account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r; })));
-    const summary = intents.map((r) => r.ok ? `${r.speaker}: ${JSON.stringify(r.payload)}` : `${r.speaker}: ERROR ${r.error}`).join("\n");
+    // a seat that has seen no new public event since its last poll has nothing to decide; skip the call
+    const seen = events.filter((e) => PUBLIC.includes(e.kind)).length;
+    const intents = await Promise.all(speakers.map((s) => {
+      if (s.polledAt === seen) {
+        setState(s.meta.id, "listening");
+        return Promise.resolve({ speaker: s.meta.id, ok: true, skipped: true, payload: { preference: "silent", intent: "contribute", topic: "nothing new since the last poll" } } as unknown as TurnResult);
+      }
+      s.polledAt = seen;
+      return s.session.send(packet(s, "intention", ""), intentionSchema, timeoutMs, { noTools: true })
+        .then((r) => { account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r; });
+    }));
+    const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${JSON.stringify(r.payload)}`).join("\n");
     publish({ author: "host", kind: "intention", text: summary });
     for (const r of intents) if (!r.ok) { diag(r, "intention"); publish({ author: r.speaker, kind: "error", text: `intention failed: ${r.error}` }); }
     saveSessions();
@@ -743,7 +755,10 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     busy = true;
     try {
       let n = 0;
-      do { ctx.ui.setStatus("committee", `cycle ${++n}${queued.length ? ` · ${queued.length} queued` : ""}`); } while (!paused && (await cycle()) > 0);
+      const cap = Math.max(1, cfg.maxRounds ?? 3);
+      let more = false;
+      do { ctx.ui.setStatus("committee", `cycle ${++n}${queued.length ? ` · ${queued.length} queued` : ""}`); } while (!paused && (more = (await cycle()) > 0) && n < cap);
+      if (more && n >= cap && !paused) ctx.ui.notify(`stopped after ${cap} rounds; type again to continue`, "info");
       ctx.ui.setStatus("committee", paused ? "paused" : "idle");
       refresh();
     } finally { busy = false; }
