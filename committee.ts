@@ -12,8 +12,8 @@ import { reportedCost } from "./accounting.ts";
 // only new events; the CLI's own context/cache holds the rest. Every call's
 // token usage is logged as a `usage` event; /usage shows the table.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SelectList, Text, fuzzyFilter, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Markdown, SelectList, Text, fuzzyFilter, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -719,7 +719,11 @@ export default function (pi: ExtensionAPI) {
       render(width: number) {
         const pad = " ".repeat(outputPad);
         const bar = ansi(color, "▏");
-        const body = wrapTextWithAnsi(d.kind === "tool" ? ansi(244, message.content) : highlightTags(message.content), Math.max(20, width - outputPad - 2));
+        const inner = Math.max(20, width - outputPad - 2);
+        // speech is markdown (bold, lists, code); tool lines stay plain dim text. tags are colored after rendering so ANSI never sits inside the markdown source
+        let body: string[];
+        if (d.kind === "tool") body = wrapTextWithAnsi(ansi(244, message.content), inner);
+        else { try { body = new Markdown(message.content, 0, 0, getMarkdownTheme()).render(inner).map(highlightTags); } catch { body = wrapTextWithAnsi(highlightTags(message.content), inner); } }
         const seat = d.kind === "human" || d.kind === "tool" ? undefined : byId(d.author)?.meta ?? ghostOf(d.author);
         const w = (d.data as any)?.tools as { calls: number; chars: number } | undefined;
         // name on the left, cli:model #thinking (and the tool-work marker) right-aligned on the same line
