@@ -75,6 +75,10 @@ export default function (pi: ExtensionAPI) {
       rulesSeen: match ? prev.rules : undefined,
       /** public transcript size when this seat was last polled; an unchanged size means nothing new to ask about */
       polledAt: undefined as number | undefined,
+      /** transcript cursor of the packet this seat is currently reading; `sent` only advances on success */
+      pendingSent: undefined as number | undefined,
+      /** true from the moment a call is dispatched until its reply lands: a busy seat is skipped, never overlapped */
+      inflight: false,
       stat: { state: "idle", since: Date.now(), fresh: 0, cached: 0, out: 0, cost: 0, calls: 0, turns: 0, lastSpoke: 0 } as Stat,
     };
   };
@@ -667,7 +671,8 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     const pub = events.filter((e) => PUBLIC.includes(e.kind));
     const fresh = pub.slice(s.sent);
     const first = s.sent === 0;
-    s.sent = pub.length;
+    // committed only when the call succeeds, so a failed or superseded call replays the gap instead of eating it
+    s.pendingSent = pub.length;
     const l = ledger();
     const ledgerLine = l !== lastLedger.get(me.id) ? `Ledger (times spoken, last cycle): ${l}\n` : "";
     lastLedger.set(me.id, l);
@@ -694,81 +699,109 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (p.action === "speak" && p.text.trim()) { setState(r.speaker, "spoke"); publish({ author: r.speaker, kind: "speak", text: p.text.trim(), data: r.tools ? { tools: r.tools } : undefined }); return 1; }
     setState(r.speaker, p.action); return 0;
   };
-  async function cycle() {
+  // ---- deliberation: a round polls only the seats that are free, and dispatches replies without
+  // awaiting them, so one slow tool-using seat never freezes the room. A busy seat reads the gap
+  // it missed as one delta batch when it returns.
+  let lastHumanId = "";
+  let pendingReplies = 0;
+  let roundsLeft = 0;
+  let spokeInRound = 0;
+  const cap = () => Math.max(1, cfg.maxRounds ?? 3);
+  const syncBusy = () => { busy = speakers.some((s) => s.inflight); };
+  const freeSeats = () => speakers.filter((s) => !s.inflight);
+
+  async function round(ctx: ExtensionContext): Promise<number> {
+    const free = freeSeats();
+    if (!free.length) return 0;
     cycleNo++;
-    for (const s of speakers) setState(s.meta.id, "thinking");
+    spokeInRound = 0;
+    for (const s of free) setState(s.meta.id, "thinking");
     // a seat that has seen no new public event since its last poll has nothing to decide; skip the call
     const seen = events.filter((e) => PUBLIC.includes(e.kind)).length;
-    const intents = await Promise.all(speakers.map((s) => {
+    const intents = await Promise.all(free.map((s) => {
       if (s.polledAt === seen) {
         setState(s.meta.id, "listening");
         return Promise.resolve({ speaker: s.meta.id, ok: true, skipped: true, payload: { preference: "silent", intent: "contribute", topic: "nothing new since the last poll" } } as unknown as TurnResult);
       }
+      s.inflight = true; syncBusy();
       // only a poll that actually happened counts as "seen up to here"; a failed call stays eligible
-      const mine = s;
       return s.session.send(packet(s, "intention", ""), intentionSchema, timeoutMs, { noTools: true })
-        .then((r) => { if (r.ok) mine.polledAt = seen; account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r; });
+        .then((r) => {
+          if (r.ok) { s.polledAt = seen; s.sent = s.pendingSent ?? s.sent; }
+          s.inflight = false; syncBusy();
+          account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r;
+        });
     }));
     const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${JSON.stringify(r.payload)}`).join("\n");
     publish({ author: "host", kind: "intention", text: summary });
     for (const r of intents) if (!r.ok) { diag(r, "intention"); publish({ author: r.speaker, kind: "error", text: `intention failed: ${r.error}` }); }
     saveSessions();
 
-    const candidates = speakers.filter((s) => { const r = intents.find((i) => i.speaker === s.meta.id); return r?.ok && (r.payload as any).preference === "speak"; });
-    for (const s of speakers) if (!candidates.includes(s)) setState(s.meta.id, "listening");
-    if (candidates.length === 0) return 0;
+    const candidates = free.filter((s) => { const r = intents.find((i) => i.speaker === s.meta.id); return r?.ok && (r.payload as any).preference === "speak" && !s.inflight; });
+    for (const s of free) if (!candidates.includes(s)) setState(s.meta.id, "listening");
+    if (!candidates.length) { if (pendingReplies === 0 && !paused) { ctx.ui.setStatus("committee", "idle"); afterRound(ctx); } return 0; } // nobody speaks: still deliver anything queued meanwhile
 
-    // one speaker wants the floor and nobody else does: nothing to weigh, let it speak
-    if (candidates.length === 1) {
-      const s = candidates[0];
-      setState(s.meta.id, s.meta.tools ? "working" : "replying");
-      const r = await s.session.send(packet(s, "respond", `Nobody else wants to speak this cycle; you have the floor.${s.meta.tools ? " Use your tools now if your intention needed a lookup." : ""} Put the contribution in text with action "speak".\n`), responseSchema, budget(s));
-      account(r, "respond"); saveSessions();
-      return takeReply(r);
+    const asHuman = lastHumanId;
+    const alone = candidates.length === 1;
+    for (const s of candidates) {
+      const extra = alone
+        ? `Nobody else wants to speak this cycle; you have the floor.${s.meta.tools ? " Use your tools now if your intention needed a lookup." : ""} Put the contribution in text with action "speak".\n`
+        : `Everyone's intentions:\n${summary}\nHold (action wait or silent, empty text) or respond now (action speak, contribution in text).${s.meta.tools ? " If you respond and your intention needed a lookup, use your tools first." : ""}\n`;
+      dispatch(ctx, s, extra, asHuman);
     }
-
-    for (const s of candidates) setState(s.meta.id, s.meta.tools ? "working" : "replying");
-    let spoke = 0;
-    await Promise.all(candidates.map((s) =>
-      s.session.send(packet(s, "respond", `Everyone's intentions:\n${summary}\nHold (action wait or silent, empty text) or respond now (action speak, contribution in text).${s.meta.tools ? " If you respond and your intention needed a lookup, use your tools first." : ""}\n`), responseSchema, budget(s))
-        .then((r) => { account(r, "respond"); spoke += takeReply(r); })));
-    saveSessions();
-    return spoke;
+    return candidates.length;
   }
+
+  /** fire a reply without awaiting it; the seat stays on the floor while it works, everyone else keeps going */
+  const dispatch = (ctx: ExtensionContext, s: (typeof speakers)[number], extra: string, asHuman: string) => {
+    s.inflight = true; pendingReplies++; syncBusy();
+    setState(s.meta.id, s.meta.tools ? "working" : "replying");
+    const done = () => { s.inflight = false; pendingReplies--; syncBusy(); saveSessions(); refresh(); if (pendingReplies === 0) afterRound(ctx); };
+    void s.session.send(packet(s, "respond", extra), responseSchema, budget(s))
+      .then((r) => {
+        account(r, "respond");
+        if (r.ok) s.sent = s.pendingSent ?? s.sent;
+        spokeInRound += takeReply(r);
+        if (lastHumanId !== asHuman) ctx.ui.notify(`${s.meta.id} answered before your latest message; ask it again if the newer one still matters`, "info");
+        done();
+      })
+      .catch((e) => { publish({ author: s.meta.id, kind: "error", text: `respond failed: ${String((e as any)?.message ?? e)}` }); done(); });
+  };
+
+  const afterRound = (ctx: ExtensionContext) => {
+    if (paused) return;
+    if (queued.length) {
+      for (const text of queued.splice(0)) { cycleNo++; publish({ author: "you", kind: "human", text }); lastHumanId = events[events.length - 1]?.id ?? ""; }
+      drawQueue(ctx); roundsLeft = cap() - 1; void round(ctx); return;
+    }
+    if (spokeInRound > 0 && roundsLeft > 0) { roundsLeft--; void round(ctx); }
+    else if (spokeInRound > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds; type again to continue`, "info"); }
+  };
 
   pi.on("input", async (event, ctx) => {
     if (!active || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
-    // typed while the room is mid-cycle: hold the text back until the cycle settles, so a seat can
-    // never read it before the queue clears. the status line is the visible "in queue" state.
-    if (busy) {
+    // only when every seat is busy does your text wait; otherwise the free seats read it now
+    if (speakers.length && freeSeats().length === 0) {
       queued.push(event.text); drawQueue(ctx);
       ctx.ui.setStatus("committee", `settling · ${queued.length} queued`);
-      ctx.ui.notify(`queued (${queued.length}): sent when this cycle settles · /queue lists, /queue drop N cancels`, "info");
+      ctx.ui.notify(`queued (${queued.length}): every seat is working · /queue drop N cancels`, "info");
       return { action: "handled" };
     }
     cycleNo++;
     publish({ author: "you", kind: "human", text: event.text });
+    lastHumanId = events[events.length - 1]?.id ?? "";
     if (paused) { heldWhilePaused = true; ctx.ui.notify("paused: logged, nobody answers until /committee resume", "warning"); return { action: "handled" }; }
-    await runCycles(ctx);
+    roundsLeft = cap() - 1;
+    await round(ctx);
     return { action: "handled" };
   });
   async function runCycles(ctx: ExtensionContext) {
-    busy = true;
-    try {
-      let n = 0;
-      const cap = Math.max(1, cfg.maxRounds ?? 3);
-      let more = false;
-      do { ctx.ui.setStatus("committee", `cycle ${++n}${queued.length ? ` · ${queued.length} queued` : ""}`); } while (!paused && (more = (await cycle()) > 0) && n < cap);
-      if (more && n >= cap && !paused) ctx.ui.notify(`stopped after ${cap} rounds; type again to continue`, "info");
-      ctx.ui.setStatus("committee", paused ? "paused" : "idle");
-      refresh();
-    } finally { busy = false; }
-    // anything typed while the room was working is published now, at the boundary, then read in one pass
-    if (queued.length && !paused) {
-      for (const text of queued.splice(0)) { cycleNo++; publish({ author: "you", kind: "human", text }); }
+    if (queued.length) {
+      for (const text of queued.splice(0)) { cycleNo++; publish({ author: "you", kind: "human", text }); lastHumanId = events[events.length - 1]?.id ?? ""; }
       drawQueue(ctx);
-      await runCycles(ctx);
     }
+    roundsLeft = cap() - 1;
+    await round(ctx);
   }
 
   pi.on("session_shutdown", async () => { if (ticker) clearInterval(ticker); saveSessions(); for (const s of speakers) s.session.close(); });
