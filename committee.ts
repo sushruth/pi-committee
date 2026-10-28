@@ -602,7 +602,7 @@ export default function (pi: ExtensionAPI) {
   /** move the room this run is speaking in, loading its log and its seat sessions */
   const roomGen = new RoomGeneration(); // a reply that started in another room is dropped, never published into this one
   const switchRoom = (id: string) => {
-    roomGen.advance(); pendingReplies = 0;
+    roomGen.advance(); pendingReplies = 0; busy = false;
     for (const s of speakers) { try { s.session.close(); } catch {} }
     speakers.length = 0; former.length = 0; cfg.former = [];
     for (const k of Object.keys(saved)) delete saved[k];
