@@ -31,7 +31,7 @@ interface Config {
   /** what every seat should know about this folder: text, or a path to a file (relative to the room, or ~) */
   brief?: string;
   timeoutSeconds?: number;
-  /** autonomous rounds per human message before the room stops on its own (default 3) */
+  /** autonomous rounds per human message before the room stops on its own: a runaway guard, not the normal stop (default 8) */
   maxRounds?: number;
   /** per call, for seats with tools (default 600) */
   toolTimeoutSeconds?: number;
@@ -825,9 +825,14 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   // it missed as one delta batch when it returns.
   let lastHumanId = "";
   let pendingReplies = 0;
-  const cap = () => Math.max(1, cfg.maxRounds ?? 3);
+  const cap = () => Math.max(1, cfg.maxRounds ?? 8);
   /** per-round bookkeeping, passed explicitly so overlapping rounds can't reset each other */
   interface RoundState { left: number; spoke: number }
+  /** from the third round on, ask seats to converge: speak only if the answer changes or a direct question is open */
+  const converge = (st: RoundState) => {
+    const round = cap() - st.left;
+    return round >= 3 ? `This is round ${round} on the same human request. Speak only if you change the answer, correct a fact, or a direct question to you is still open. Otherwise hold; agreement and restating are not needed.` : "";
+  };
   const newState = (): RoundState => ({ left: cap() - 1, spoke: 0 });
   const syncBusy = () => { busy = speakers.some((s) => s.inflight); };
   const freeSeats = () => speakers.filter((s) => !s.inflight);
@@ -848,7 +853,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
       }
       s.inflight = true; syncBusy();
       // only a poll that actually happened counts as "seen up to here"; a failed call stays eligible
-      return s.session.send(packet(s, "intention", ""), intentionSchema, timeoutMs, { noTools: true })
+      return s.session.send(packet(s, "intention", converge(state)), intentionSchema, timeoutMs, { noTools: true })
         .then((r) => {
           if (r.ok) { s.polledAt = seen; s.sent = s.pendingSent ?? s.sent; }
           s.inflight = false; syncBusy();
@@ -914,7 +919,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
       queued.splice(0); drawQueue(ctx); const fresh = newState(); void round(ctx, fresh); return;
     }
     if (state.spoke > 0 && state.left > 0) { state.left--; void round(ctx, state); }
-    else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds; type again to continue`, "info"); }
+    else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds (safety limit); type again to continue`, "info"); }
   };
 
   pi.on("input", async (event, ctx) => {
