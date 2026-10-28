@@ -112,7 +112,7 @@ export default function (pi: ExtensionAPI) {
   const queued: string[] = [];
   // one dim line per waiting message, in pi's own vocabulary, above the editor
   const drawQueue = (ctx: ExtensionContext) =>
-    ctx.ui.setWidget("committee-queue", queued.length ? queued.map((t, i) => `⏳ queued ${i + 1}: ${t}`) : undefined, { placement: "aboveEditor" });
+    ctx.ui.setWidget("committee-queue", queued.length ? queued.map((t, i) => `⏳ waiting ${i + 1}: ${t} (already sent)`) : undefined, { placement: "aboveEditor" });
   let paused = false;
   let heldWhilePaused = false;
   const saveSessions = () => {
@@ -368,19 +368,12 @@ export default function (pi: ExtensionAPI) {
   };
 
   pi.registerCommand("queue", {
-    description: "List messages waiting for the room to settle; /queue drop <n> cancels one, /queue clear drops them all",
+    description: "List messages waiting for a seat to free up (they are already in the room; they cannot be cancelled)",
     handler: async (args, ctx) => {
       const a = (args ?? "").trim();
-      if (!queued.length) return ctx.ui.notify("queue empty", "info");
-      if (a === "clear") { const n = queued.length; queued.length = 0; drawQueue(ctx); return ctx.ui.notify(`dropped ${n} queued`, "info"); }
-      const drop = a.match(/^drop\s+(\d+)$/);
-      if (drop) {
-        const i = Number(drop[1]) - 1;
-        if (i < 0 || i >= queued.length) return ctx.ui.notify(`no message ${drop[1]}; queue has ${queued.length}`, "warning");
-        const [gone] = queued.splice(i, 1); drawQueue(ctx);
-        return ctx.ui.notify(`dropped: ${gone.slice(0, 60)}`, "info");
-      }
-      ctx.ui.notify(queued.map((t, i) => `${i + 1}. ${t.slice(0, 80)}`).join("\n"), "info");
+      if (!queued.length) return ctx.ui.notify("nothing waiting: no message is held back", "info");
+      if (a === "clear" || a.startsWith("drop")) return ctx.ui.notify("cannot cancel: the message is already in the room and the seats will read it. Use /clear to drop it from view.", "warning");
+      ctx.ui.notify(`waiting for a free seat (already in the room):\n${queued.map((t, i) => `${i + 1}. ${t.slice(0, 80)}`).join("\n")}`, "info");
     },
   });
 
@@ -704,17 +697,18 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   // it missed as one delta batch when it returns.
   let lastHumanId = "";
   let pendingReplies = 0;
-  let roundsLeft = 0;
-  let spokeInRound = 0;
   const cap = () => Math.max(1, cfg.maxRounds ?? 3);
+  /** per-round bookkeeping, passed explicitly so overlapping rounds can't reset each other */
+  interface RoundState { left: number; spoke: number }
+  const newState = (): RoundState => ({ left: cap() - 1, spoke: 0 });
   const syncBusy = () => { busy = speakers.some((s) => s.inflight); };
   const freeSeats = () => speakers.filter((s) => !s.inflight);
 
-  async function round(ctx: ExtensionContext): Promise<number> {
-    const free = freeSeats();
+  async function round(ctx: ExtensionContext, state: RoundState, only?: (typeof speakers)[number]): Promise<number> {
+    const free = only ? (only.inflight ? [] : [only]) : freeSeats();
     if (!free.length) return 0;
     cycleNo++;
-    spokeInRound = 0;
+    if (!only) state.spoke = 0;
     for (const s of free) setState(s.meta.id, "thinking");
     // a seat that has seen no new public event since its last poll has nothing to decide; skip the call
     const seen = events.filter((e) => PUBLIC.includes(e.kind)).length;
@@ -733,13 +727,15 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         });
     }));
     const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${JSON.stringify(r.payload)}`).join("\n");
-    publish({ author: "host", kind: "intention", text: summary });
-    for (const r of intents) if (!r.ok) { diag(r, "intention"); publish({ author: r.speaker, kind: "error", text: `intention failed: ${r.error}` }); }
+    if (!only) {
+      publish({ author: "host", kind: "intention", text: summary });
+      for (const r of intents) if (!r.ok) { diag(r, "intention"); publish({ author: r.speaker, kind: "error", text: `intention failed: ${r.error}` }); }
+    }
     saveSessions();
 
     const candidates = free.filter((s) => { const r = intents.find((i) => i.speaker === s.meta.id); return r?.ok && (r.payload as any).preference === "speak" && !s.inflight; });
     for (const s of free) if (!candidates.includes(s)) setState(s.meta.id, "listening");
-    if (!candidates.length) { if (pendingReplies === 0 && !paused) { ctx.ui.setStatus("committee", "idle"); afterRound(ctx); } return 0; } // nobody speaks: still deliver anything queued meanwhile
+    if (!candidates.length) { if (pendingReplies === 0 && !paused) { ctx.ui.setStatus("committee", "idle"); afterRound(ctx, state); } return 0; } // nobody speaks: still deliver anything queued meanwhile
 
     const asHuman = lastHumanId;
     const alone = candidates.length === 1;
@@ -747,61 +743,67 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
       const extra = alone
         ? `Nobody else wants to speak this cycle; you have the floor.${s.meta.tools ? " Use your tools now if your intention needed a lookup." : ""} Put the contribution in text with action "speak".\n`
         : `Everyone's intentions:\n${summary}\nHold (action wait or silent, empty text) or respond now (action speak, contribution in text).${s.meta.tools ? " If you respond and your intention needed a lookup, use your tools first." : ""}\n`;
-      dispatch(ctx, s, extra, asHuman);
+      dispatch(ctx, s, extra, asHuman, state);
     }
     return candidates.length;
   }
 
   /** fire a reply without awaiting it; the seat stays on the floor while it works, everyone else keeps going */
-  const dispatch = (ctx: ExtensionContext, s: (typeof speakers)[number], extra: string, asHuman: string) => {
+  const dispatch = (ctx: ExtensionContext, s: (typeof speakers)[number], extra: string, asHuman: string, state: RoundState) => {
     s.inflight = true; pendingReplies++; syncBusy();
     setState(s.meta.id, s.meta.tools ? "working" : "replying");
-    const done = () => { s.inflight = false; pendingReplies--; syncBusy(); saveSessions(); refresh(); if (pendingReplies === 0) afterRound(ctx); };
     void s.session.send(packet(s, "respond", extra), responseSchema, budget(s))
       .then((r) => {
         account(r, "respond");
         if (r.ok) s.sent = s.pendingSent ?? s.sent;
-        spokeInRound += takeReply(r);
-        if (lastHumanId !== asHuman) ctx.ui.notify(`${s.meta.id} answered before your latest message; ask it again if the newer one still matters`, "info");
-        done();
+        state.spoke += takeReply(r);
+        s.inflight = false; pendingReplies--; syncBusy(); saveSessions(); refresh();
+        // this seat alone catches up on anything said while it worked; it does not wait for co-respondents
+        if (lastHumanId && lastHumanId !== asHuman) {
+          if (paused) return; // catch-up waits for /committee resume
+          ctx.ui.notify(`${s.meta.id} answered before your latest message; catching it up now`, "info");
+          if (queued.length) { queued.splice(0); drawQueue(ctx); }
+          void round(ctx, state, s); return;
+        }
+        if (pendingReplies === 0) afterRound(ctx, state);
       })
-      .catch((e) => { publish({ author: s.meta.id, kind: "error", text: `respond failed: ${String((e as any)?.message ?? e)}` }); done(); });
+      .catch((e) => {
+        publish({ author: s.meta.id, kind: "error", text: `respond failed: ${String((e as any)?.message ?? e)}` });
+        s.inflight = false; pendingReplies--; syncBusy(); saveSessions(); refresh();
+        if (pendingReplies === 0) afterRound(ctx, state);
+      });
   };
 
-  const afterRound = (ctx: ExtensionContext) => {
+  const afterRound = (ctx: ExtensionContext, state: RoundState) => {
     if (paused) return;
     if (queued.length) {
-      for (const text of queued.splice(0)) { cycleNo++; publish({ author: "you", kind: "human", text }); lastHumanId = events[events.length - 1]?.id ?? ""; }
-      drawQueue(ctx); roundsLeft = cap() - 1; void round(ctx); return;
+      // already published at input time; only the round was held back
+      queued.splice(0); drawQueue(ctx); const fresh = newState(); void round(ctx, fresh); return;
     }
-    if (spokeInRound > 0 && roundsLeft > 0) { roundsLeft--; void round(ctx); }
-    else if (spokeInRound > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds; type again to continue`, "info"); }
+    if (state.spoke > 0 && state.left > 0) { state.left--; void round(ctx, state); }
+    else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds; type again to continue`, "info"); }
   };
 
   pi.on("input", async (event, ctx) => {
     if (!active || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
-    // only when every seat is busy does your text wait; otherwise the free seats read it now
-    if (speakers.length && freeSeats().length === 0) {
-      queued.push(event.text); drawQueue(ctx);
-      ctx.ui.setStatus("committee", `settling · ${queued.length} queued`);
-      ctx.ui.notify(`queued (${queued.length}): every seat is working · /queue drop N cancels`, "info");
-      return { action: "handled" };
-    }
     cycleNo++;
     publish({ author: "you", kind: "human", text: event.text });
     lastHumanId = events[events.length - 1]?.id ?? "";
     if (paused) { heldWhilePaused = true; ctx.ui.notify("paused: logged, nobody answers until /committee resume", "warning"); return { action: "handled" }; }
-    roundsLeft = cap() - 1;
-    await round(ctx);
+    // every seat is busy: the message is in the room already, so the first seat to finish reads it and
+    // catches up; the round itself waits for a free seat
+    if (speakers.length && freeSeats().length === 0) {
+      queued.push(event.text); drawQueue(ctx);
+      ctx.ui.setStatus("committee", `waiting · ${queued.length}`);
+      ctx.ui.notify(`waiting for a free seat (${queued.length}): your message is already in the room and will be read when a seat returns · /queue lists`, "info");
+      return { action: "handled" };
+    }
+    await round(ctx, newState());
     return { action: "handled" };
   });
   async function runCycles(ctx: ExtensionContext) {
-    if (queued.length) {
-      for (const text of queued.splice(0)) { cycleNo++; publish({ author: "you", kind: "human", text }); lastHumanId = events[events.length - 1]?.id ?? ""; }
-      drawQueue(ctx);
-    }
-    roundsLeft = cap() - 1;
-    await round(ctx);
+    if (queued.length) { queued.splice(0); drawQueue(ctx); }
+    await round(ctx, newState());
   }
 
   pi.on("session_shutdown", async () => { if (ticker) clearInterval(ticker); saveSessions(); for (const s of speakers) s.session.close(); });
