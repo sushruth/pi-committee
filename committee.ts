@@ -12,7 +12,7 @@ import { reportedCost } from "./accounting.ts";
 // only new events; the CLI's own context/cache holds the rest. Every call's
 // token usage is logged as a `usage` event; /usage shows the table.
 
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager, getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Markdown, SelectList, Text, fuzzyFilter, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -167,11 +167,32 @@ export default function (pi: ExtensionAPI) {
     if (ev.kind === "speak") { const st = byId(ev.author)?.stat; if (st) { st.turns++; st.lastSpoke = ev.cycle; } floorHolder = ev.author; }
     if (ev.kind === "human") cycleNo = ev.cycle;
   };
+  // one real pi session per room, so the room shows up in pi's native /resume list and carries the conversation
+  let roomSession: SessionManager | undefined;
+  const mirrorFile = () => roomPath("pi-session");
+  // one writer at a time, and never a cached tree: open the file fresh per message so another
+  // writer (pi itself, after a native resume of this room) cannot leave us appending to a stale leaf
+  const mirror = (text: string) => {
+    roomSession = undefined;
+    try {
+      let saved: string | undefined;
+      try { saved = readFileSync(mirrorFile(), "utf8").trim() || undefined; } catch {}
+      const fresh = !(saved && existsSync(saved));
+      roomSession = fresh ? SessionManager.create(cwd, undefined, { id: roomId }) : SessionManager.open(saved!, undefined, cwd);
+      // lifecycle.roomBinding looks for exactly this entry on resume; without it the room is listed but never reattaches
+      if (fresh) roomSession.appendCustomEntry("committee-room", { roomId });
+      roomSession.appendMessage({ role: "user", content: text, timestamp: Date.now() });
+      const f = roomSession.getSessionFile();
+      if (f) writeFileSync(mirrorFile(), f + "\n");
+    } catch (e) { appendFileSync(diagPath, JSON.stringify({ ts: Date.now(), phase: "mirror", error: String(e) }) + "\n"); }
+    roomSession = undefined;
+  };
   const publish = (e: Omit<Event, "id" | "cycle">) => {
     const ev: Event = { id: `event-${events.length + 1}`, cycle: cycleNo, ...e };
     record(ev);
     appendFileSync(logPath, JSON.stringify({ ts: Date.now(), ...ev }) + "\n");
     if (PUBLIC.includes(ev.kind)) pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
+    if (ev.kind === "human") mirror(ev.text);
     return ev;
   };
   const diag = (r: TurnResult, phase: string) => appendFileSync(diagPath, JSON.stringify({ ts: Date.now(), phase, speaker: r.speaker, error: r.error, raw: r.raw }) + "\n");
@@ -607,7 +628,7 @@ export default function (pi: ExtensionAPI) {
     speakers.length = 0; former.length = 0; cfg.former = [];
     for (const k of Object.keys(saved)) delete saved[k];
     events.length = 0; cycleNo = 0; floorHolder = null; openSeat = null; lastLedger.clear();
-    roomId = id; logPath = roomPath("events.jsonl"); sessPath = roomPath("sessions.json");
+    roomId = id; logPath = roomPath("events.jsonl"); sessPath = roomPath("sessions.json"); roomSession = undefined;
     mkdirSync(join(roomsDir, roomId), { recursive: true });
     writeFileSync(join(dir, "current"), roomId + "\n");
     if (existsSync(logPath)) {
@@ -623,6 +644,20 @@ export default function (pi: ExtensionAPI) {
   /** archived conversations, newest first, current excluded */
   const roomsList = () => { try { return readdirSync(roomsDir).filter((n) => n !== roomId).sort().reverse(); } catch { return [] as string[]; } };
 
+  /** resume an archived room: the current one is archived first, then its seats' sessions are reattached */
+  const resumeRoom = async (ctx: ExtensionContext) => {
+    if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
+    const rooms = roomsList();
+    if (!rooms.length) return ctx.ui.notify("no archived rooms in this folder yet", "info");
+    const pick = await ctx.ui.select("Resume an archived committee room", [...rooms, "cancel"]);
+    if (!pick || pick === "cancel") return;
+    switchRoom(pick); await enableMode(ctx);
+    ctx.ui.notify(`resumed room ${pick}`, "info");
+  };
+  pi.registerCommand("resume-committee", {
+    description: "Resume an archived committee room in this folder (the current room is archived first); the seats' native sessions are reattached",
+    handler: async (_args, ctx) => { await resumeRoom(ctx); },
+  });
   pi.registerCommand("committee", {
     description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; brief <text|path> = what seats should know about this folder (- clears); sessions = pick an archived room to resume (the current one is archived first); fresh = archive this room and start a new conversation with the same seats; reset = delete this folder's committee.json and committee/",
     handler: async (args, ctx) => {
@@ -646,15 +681,7 @@ export default function (pi: ExtensionAPI) {
         await enableMode(ctx);
         return ctx.ui.notify(`started a fresh conversation (room ${roomId})`, "info");
       }
-      if (args.trim() === "sessions") {
-        if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
-        const rooms = roomsList();
-        if (!rooms.length) return ctx.ui.notify("no archived rooms in this folder yet", "info");
-        const pick = await ctx.ui.select("Resume an archived committee room", [...rooms, "cancel"]);
-        if (!pick || pick === "cancel") return;
-        switchRoom(pick); await enableMode(ctx);
-        return ctx.ui.notify(`resumed room ${pick}`, "info");
-      }
+      if (args.trim() === "sessions") return resumeRoom(ctx);
       if (args.trim() === "reset") {
         if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
         const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
