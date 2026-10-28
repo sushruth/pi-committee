@@ -831,7 +831,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   /** from the third round on, ask seats to converge: speak only if the answer changes or a direct question is open */
   const converge = (st: RoundState) => {
     const round = cap() - st.left;
-    return round >= 3 ? `This is round ${round} on the same human request. Speak only if you change the answer, correct a fact, or a direct question to you is still open. Otherwise hold; agreement and restating are not needed.` : "";
+    return round >= 3 ? `This is round ${round} on the same human request. Speak only if you change the answer, correct a fact, or a direct question to you is still open. Otherwise hold; agreement and restating are not needed.\n` : "";
   };
   const newState = (): RoundState => ({ left: cap() - 1, spoke: 0 });
   const syncBusy = () => { busy = speakers.some((s) => s.inflight); };
