@@ -51,9 +51,22 @@ export default function (pi: ExtensionAPI) {
     : { speakers: [], etiquette: "Be conversational and brief. Silence is welcome. Yield when someone else covers your point. Humans can speak at any time. Nobody schedules turns." };
   const dir = join(cwd, "committee");
   mkdirSync(dir, { recursive: true });
-  const logPath = join(dir, "events.jsonl");
+  // one directory per conversation; `current` names the room this run is speaking in
+  const roomsDir = join(dir, "rooms");
+  mkdirSync(roomsDir, { recursive: true });
+  const newRoomId = () => new Date().toISOString().replace(/[:.]/g, "-");
+  // migrate a pre-rooms room into rooms/<id>/ so nothing is stranded at the root
+  if (existsSync(join(dir, "events.jsonl")) || existsSync(join(dir, "sessions.json"))) {
+    const legacy = newRoomId(); mkdirSync(join(roomsDir, legacy), { recursive: true });
+    for (const f of ["events.jsonl", "sessions.json"]) { const src = join(dir, f); if (existsSync(src)) renameSync(src, join(roomsDir, legacy, f)); }
+    writeFileSync(join(dir, "current"), legacy + "\n");
+  }
+  let roomId = (() => { try { const v = readFileSync(join(dir, "current"), "utf8").trim(); if (v) return v; } catch {} const v = newRoomId(); mkdirSync(join(roomsDir, v), { recursive: true }); writeFileSync(join(dir, "current"), v + "\n"); return v; })();
+  const roomPath = (f: string) => join(roomsDir, roomId, f);
+  let logPath = roomPath("events.jsonl");
   const diagPath = join(dir, "diag.jsonl");
-  const sessPath = join(dir, "sessions.json");
+  let sessPath = roomPath("sessions.json");
+  mkdirSync(join(roomsDir, roomId), { recursive: true });
   const timeoutMs = (cfg.timeoutSeconds ?? 120) * 1000;
   const toolTimeoutMs = (cfg.toolTimeoutSeconds ?? 600) * 1000;
   const budget = (s: { meta: Seat }) => (s.meta.tools ? toolTimeoutMs : timeoutMs);
@@ -368,7 +381,6 @@ export default function (pi: ExtensionAPI) {
     // `pi --committee` always starts a new conversation: the previous room is archived, never deleted.
     // an old room comes back through /committee sessions.
     if (pi.getFlag("committee") === true) {
-      if (events.some((e) => PUBLIC.includes(e.kind))) { const dest = archiveRoom(); ctx.ui.notify(`previous room archived in ${dest}`, "info"); }
       freshRoom();
       await enableMode(ctx);
       return;
@@ -472,6 +484,11 @@ export default function (pi: ExtensionAPI) {
   // one path for turning the room on: /committee on, and a click on the hint
   enableMode = async (ctx: ExtensionContext) => {
     if (!active && speakers.length === 0 && !(await onboarding(ctx))) return ctx.ui.notify("no seats, committee stays off", "warning");
+    // make this pi session findable in the native /resume list, and remember which room it belongs to
+    try {
+      if (!pi.getSessionName()) pi.setSessionName(`⚒ ${roomId}`);
+      pi.appendEntry("committee-room", { roomId });
+    } catch {}
     await show(ctx);
     active = true; applyMode(ctx);
     ctx.ui.notify("committee mode on", "info");
@@ -575,41 +592,16 @@ export default function (pi: ExtensionAPI) {
   };
   // alt+p pauses; resume is manual. escape is out: pi reserves it for interrupt and select-cancel
   pi.registerShortcut("alt+p", { description: "committee: pause the seats", handler: (ctx) => pause(ctx) });
-  // ---- a fresh conversation in the same committee: everything on disk is archived, never deleted
-  const archiveRoom = () => {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const dest = join(dir, "archive", stamp);
-    mkdirSync(dest, { recursive: true });
-    for (const f of ["events.jsonl", "sessions.json"]) {
-      const src = join(dir, f);
-      if (existsSync(src)) renameSync(src, join(dest, f));
-    }
-    return dest;
-  };
-  const freshRoom = () => {
-    for (const s of speakers) { try { s.session.close(); } catch {} }
-    speakers.length = 0; former.length = 0; cfg.former = [];
-    for (const k of Object.keys(saved)) delete saved[k];
-    events.length = 0; cycleNo = 0; floorHolder = null; openSeat = null; lastLedger.clear();
-    booted = false; boot();                       // same seats, brand-new CLI sessions
-    shown = false;                                // let show() set the footer and replay (nothing to replay)
-  };
-
-  // archived rooms, newest first
-  const roomsList = () => {
-    const a = join(dir, "archive");
-    if (!existsSync(a)) return [] as string[];
-    return readdirSync(a).filter((n) => existsSync(join(a, n, "events.jsonl"))).sort().reverse();
-  };
-  /** put an archived room back in place; whatever is current gets archived first, so nothing is lost */
-  const openRoom = (stamp: string) => {
-    if (events.some((e) => PUBLIC.includes(e.kind))) archiveRoom();
+  // ---- one directory per conversation; switching never deletes anything
+  /** move the room this run is speaking in, loading its log and its seat sessions */
+  const switchRoom = (id: string) => {
     for (const s of speakers) { try { s.session.close(); } catch {} }
     speakers.length = 0; former.length = 0;
     for (const k of Object.keys(saved)) delete saved[k];
     events.length = 0; cycleNo = 0; floorHolder = null; openSeat = null; lastLedger.clear();
-    const srcDir = join(dir, "archive", stamp);
-    for (const f of ["events.jsonl", "sessions.json"]) { const src = join(srcDir, f); if (existsSync(src)) renameSync(src, join(dir, f)); }
+    roomId = id; logPath = roomPath("events.jsonl"); sessPath = roomPath("sessions.json");
+    mkdirSync(join(roomsDir, roomId), { recursive: true });
+    writeFileSync(join(dir, "current"), roomId + "\n");
     if (existsSync(logPath)) {
       for (const line of readFileSync(logPath, "utf8").split("\n")) {
         if (!line.trim()) continue;
@@ -617,9 +609,11 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (existsSync(sessPath)) { try { Object.assign(saved, JSON.parse(readFileSync(sessPath, "utf8"))); } catch {} }
-    try { rmSync(srcDir, { recursive: true, force: true }); } catch {}
     booted = false; boot(); shown = false;
   };
+  const freshRoom = () => switchRoom(newRoomId());
+  /** archived conversations, newest first, current excluded */
+  const roomsList = () => { try { return readdirSync(roomsDir).filter((n) => n !== roomId).sort().reverse(); } catch { return [] as string[]; } };
 
   pi.registerCommand("committee", {
     description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; brief <text|path> = what seats should know about this folder (- clears); sessions = pick an archived room to resume (the current one is archived first); fresh = archive this room and start a new conversation with the same seats; reset = delete this folder's committee.json and committee/",
@@ -640,10 +634,9 @@ export default function (pi: ExtensionAPI) {
       // fresh conversation, same committee: archive this room and start with empty seats
       if (args.trim() === "fresh") {
         if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
-        const dest = archiveRoom();
         freshRoom();
         await enableMode(ctx);
-        return ctx.ui.notify(`started a fresh conversation; the old room is archived in ${dest}`, "info");
+        return ctx.ui.notify(`started a fresh conversation (room ${roomId})`, "info");
       }
       if (args.trim() === "sessions") {
         if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
@@ -651,7 +644,7 @@ export default function (pi: ExtensionAPI) {
         if (!rooms.length) return ctx.ui.notify("no archived rooms in this folder yet", "info");
         const pick = await ctx.ui.select("Resume an archived committee room", [...rooms, "cancel"]);
         if (!pick || pick === "cancel") return;
-        openRoom(pick); await enableMode(ctx);
+        switchRoom(pick); await enableMode(ctx);
         return ctx.ui.notify(`resumed room ${pick}`, "info");
       }
       if (args.trim() === "reset") {
