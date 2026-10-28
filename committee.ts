@@ -704,9 +704,10 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         setState(s.meta.id, "listening");
         return Promise.resolve({ speaker: s.meta.id, ok: true, skipped: true, payload: { preference: "silent", intent: "contribute", topic: "nothing new since the last poll" } } as unknown as TurnResult);
       }
-      s.polledAt = seen;
+      // only a poll that actually happened counts as "seen up to here"; a failed call stays eligible
+      const mine = s;
       return s.session.send(packet(s, "intention", ""), intentionSchema, timeoutMs, { noTools: true })
-        .then((r) => { account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r; });
+        .then((r) => { if (r.ok) mine.polledAt = seen; account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r; });
     }));
     const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${JSON.stringify(r.payload)}`).join("\n");
     publish({ author: "host", kind: "intention", text: summary });
