@@ -912,7 +912,9 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         if (!roomGen.accepts(tok)) return;
         account(r, "respond");
         if (r.ok) s.sent = s.pendingSent ?? s.sent;
-        state.spoke += takeReply(r);
+        const published = takeReply(r);
+        if (published > 0) answeredHumans.add(asHuman);
+        state.spoke += published;
         s.inflight = false; pendingReplies--; syncBusy(); saveSessions(); refresh();
         // this seat alone catches up on anything said while it worked; it does not wait for co-respondents
         if (lastHumanId && lastHumanId !== asHuman) {
@@ -937,10 +939,9 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   /** a human message must not end unanswered: when the round ended with no published reply since it, ask the seat that has spoken least, once, with no option to hold */
   let forcedFor = "";
   let notedFor = "";
-  const unanswered = () => {
-    const i = events.map((e) => e.kind).lastIndexOf("human");
-    return i >= 0 && !events.slice(i + 1).some((e) => e.kind === "speak");
-  };
+  /** human message ids that got a published reply from a call dispatched for that message; a late reply to an older message does not count */
+  const answeredHumans = new Set<string>();
+  const unanswered = () => !!lastHumanId && !answeredHumans.has(lastHumanId);
   const forceAnswer = (ctx: ExtensionContext, state: RoundState): boolean => {
     if (lastHumanId && forcedFor === lastHumanId && unanswered() && notedFor !== lastHumanId) {
       notedFor = lastHumanId;
