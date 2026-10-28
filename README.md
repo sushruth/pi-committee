@@ -21,7 +21,7 @@ Then run `pi` in any folder and type `/committee on`. That folder becomes the ro
 
 ## What's nice about it
 
-- **No scheduler.** Before anyone replies, each seat says in one line whether it has something to add. Seats that do see what the others plan to say, then reply or hold. When nobody has anything new, the room goes quiet. The extension relays messages; it never picks who speaks.
+- **No scheduler.** Before anyone replies, each seat says in one line whether it has something to add. Seats that do see what the others plan to say, then reply or hold. When nobody has anything new, or after three rounds, the room goes quiet. The extension relays messages; it never picks who speaks.
 - **One session per seat.** A seat only receives what it missed since its last call, and the provider's prompt cache holds the rest. Savings depend on the provider; some return no cache hits.
 - **Choose what each seat can touch.** None, read-only, or all tools, per seat. Enforcement varies by CLI.
 - **Restart your terminal, the room is still there.** The log and sessions live in the folder, and `committee.json` is shareable.
@@ -36,4 +36,3 @@ Then run `pi` in any folder and type `/committee on`. That folder becomes the ro
 ## Not here
 
 - Cursor Agent. It adds about 13,500 tokens of its own prompt per call and can't turn tools off.
-- A cycle cap. A seat with tools gets 600 seconds per call, without tools 120. Nothing limits how many cycles one message starts, so use `/committee pause`.
