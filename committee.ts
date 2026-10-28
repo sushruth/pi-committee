@@ -169,15 +169,21 @@ export default function (pi: ExtensionAPI) {
   };
   // one real pi session per room, so the room shows up in pi's native /resume list and carries the conversation
   let roomSession: SessionManager | undefined;
+  let activeCtx: ExtensionContext | undefined;
   const mirrorFile = () => roomPath("pi-session");
-  // one writer at a time, and never a cached tree: open the file fresh per message so another
-  // writer (pi itself, after a native resume of this room) cannot leave us appending to a stale leaf
+  // no writer of our own caches a tree: we open the file fresh, append one message, and drop the manager.
+  // This does not make us the only writer. After pi natively resumes one of these files, pi's own
+  // session manager holds it too, and its cached leaf will not see what we append here (and vice
+  // versa) until it reloads. Unknown: whether that shows up as a lost branch in practice.
   const mirror = (text: string) => {
     roomSession = undefined;
     try {
       let saved: string | undefined;
       try { saved = readFileSync(mirrorFile(), "utf8").trim() || undefined; } catch {}
+      // if pi is already writing this same file, leave it alone rather than race it
+      const piFile = activeCtx?.sessionManager?.getSessionFile?.();
       const fresh = !(saved && existsSync(saved));
+      if (piFile && saved && piFile === saved) return;
       roomSession = fresh ? SessionManager.create(cwd, undefined, { id: roomId }) : SessionManager.open(saved!, undefined, cwd);
       // lifecycle.roomBinding looks for exactly this entry on resume; without it the room is listed but never reattaches
       if (fresh) roomSession.appendCustomEntry("committee-room", { roomId });
@@ -510,6 +516,7 @@ export default function (pi: ExtensionAPI) {
   };
   // one path for turning the room on: /committee on, and a click on the hint
   enableMode = async (ctx: ExtensionContext) => {
+    activeCtx = ctx;
     if (!active && speakers.length === 0 && !(await onboarding(ctx))) return ctx.ui.notify("no seats, committee stays off", "warning");
     // make this pi session findable in the native /resume list, and remember which room it belongs to
     try {
@@ -911,6 +918,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   };
 
   pi.on("input", async (event, ctx) => {
+    activeCtx = ctx;
     if (!active || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
     cycleNo++;
     publish({ author: "you", kind: "human", text: event.text });
