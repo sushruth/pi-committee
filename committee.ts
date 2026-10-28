@@ -596,7 +596,7 @@ export default function (pi: ExtensionAPI) {
   /** move the room this run is speaking in, loading its log and its seat sessions */
   const switchRoom = (id: string) => {
     for (const s of speakers) { try { s.session.close(); } catch {} }
-    speakers.length = 0; former.length = 0;
+    speakers.length = 0; former.length = 0; cfg.former = [];
     for (const k of Object.keys(saved)) delete saved[k];
     events.length = 0; cycleNo = 0; floorHolder = null; openSeat = null; lastLedger.clear();
     roomId = id; logPath = roomPath("events.jsonl"); sessPath = roomPath("sessions.json");
