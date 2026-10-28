@@ -667,11 +667,11 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify(`resumed room ${pick}`, "info");
   };
   pi.registerCommand("resume-committee", {
-    description: "Resume an archived committee room in this folder (the current room is archived first); the seats' native sessions are reattached",
+    description: "Resume an earlier conversation in this folder; the current room stays on disk, and the seats' native sessions are reattached",
     handler: async (_args, ctx) => { await resumeRoom(ctx); },
   });
   pi.registerCommand("committee", {
-    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; brief <text|path> = what seats should know about this folder (- clears); sessions = pick an archived room to resume (the current one is archived first); fresh = archive this room and start a new conversation with the same seats; reset = delete this folder's committee.json and committee/",
+    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; brief <text|path> = what seats should know about this folder (- clears); sessions = pick an earlier room to resume (the current one stays on disk); fresh = archive this room and start a new conversation with the same seats; reset = delete this folder's committee.json and committee/",
     handler: async (args, ctx) => {
       if (args.trim() === "pause") return pause(ctx);
       if (args.trim() === "resume") {
