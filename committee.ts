@@ -934,12 +934,30 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
       });
   };
 
+  /** a human message must not end unanswered: when the round ended with no published reply since it, ask the seat that has spoken least, once, with no option to hold */
+  let forcedFor = "";
+  const unanswered = () => {
+    const i = events.map((e) => e.kind).lastIndexOf("human");
+    return i >= 0 && !events.slice(i + 1).some((e) => e.kind === "speak");
+  };
+  const forceAnswer = (ctx: ExtensionContext, state: RoundState): boolean => {
+    if (!lastHumanId || forcedFor === lastHumanId || !unanswered()) return false;
+    const pool = freeSeats().filter((s) => !state.focus || state.focus.has(s.meta.id));
+    const seat = (pool.length ? pool : freeSeats()).sort((a, b) => a.stat.turns - b.stat.turns)[0];
+    if (!seat) return false;
+    forcedFor = lastHumanId;
+    ctx.ui.notify(`nobody answered: asking ${seat.meta.id} directly`, "info");
+    dispatch(ctx, seat, `Nobody has answered the human's last message. You must answer it now: action "speak" with your answer (or "repeat" an earlier reply of yours). Do not hold.`, lastHumanId, state);
+    return true;
+  };
+
   const afterRound = (ctx: ExtensionContext, state: RoundState) => {
     if (paused) return;
     if (queued.length) {
       // already published at input time; only the round was held back
       const focus = focusOfQueue(); queued.splice(0); drawQueue(ctx); const fresh = newState(focus); void round(ctx, fresh); return;
     }
+    if (state.spoke === 0 && forceAnswer(ctx, state)) return;
     if (state.spoke > 0 && state.left > 0) { state.left--; void round(ctx, state); }
     else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds (safety limit); type again to continue`, "info"); }
   };
