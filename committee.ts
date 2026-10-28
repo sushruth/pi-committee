@@ -132,6 +132,8 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setWidget("committee-queue", queued.length ? queued.map((t, i) => `⏳ waiting ${i + 1}: ${t} (already sent)`) : undefined, { placement: "aboveEditor" });
   let paused = false;
   let heldWhilePaused = false;
+  const pausedTexts: string[] = [];
+  let lastHumanText = "";
   const saveSessions = () => {
     const out: Record<string, Saved> = {};
     for (const s of speakers) out[s.meta.id] = { cli: s.meta.cli, model: s.meta.model, thinking: s.meta.thinking, tools: s.meta.tools, session_id: s.session.session_id, sent: s.sent, rules: s.rulesSeen };
@@ -637,7 +639,7 @@ export default function (pi: ExtensionAPI) {
     for (const s of speakers) { try { s.session.close(); } catch {} }
     speakers.length = 0; former.length = 0; cfg.former = [];
     for (const k of Object.keys(saved)) delete saved[k];
-    events.length = 0; cycleNo = 0; floorHolder = null; openSeat = null; lastLedger.clear();
+    events.length = 0; pausedTexts.length = 0; cycleNo = 0; floorHolder = null; openSeat = null; lastLedger.clear();
     roomId = id; logPath = roomPath("events.jsonl"); sessPath = roomPath("sessions.json"); roomSession = undefined;
     mkdirSync(join(roomsDir, roomId), { recursive: true });
     writeFileSync(join(dir, "current"), roomId + "\n");
@@ -699,7 +701,7 @@ export default function (pi: ExtensionAPI) {
         if (ok !== "yes, I am sure") return;
         for (const s of speakers) s.session.close();
         rmSync(seatsPath, { force: true }); rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true });
-        events.length = 0; cycleNo = 0; floorHolder = null; lastLedger.clear(); openSeat = null;
+        events.length = 0; pausedTexts.length = 0; cycleNo = 0; floorHolder = null; lastLedger.clear(); openSeat = null;
         for (const k of Object.keys(saved)) delete saved[k];
         speakers.length = 0; former.length = 0; cfg.speakers = []; cfg.former = [];
         active = false; applyMode(ctx);
@@ -912,6 +914,9 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         // this seat alone catches up on anything said while it worked; it does not wait for co-respondents
         if (lastHumanId && lastHumanId !== asHuman) {
           if (paused) return; // catch-up waits for /committee resume
+          // routed message addressed to other seats: this seat does not catch up, and the queued request stays for its recipient
+          const f = focusOf(lastHumanText);
+          if (f && !f.has(s.meta.id)) { if (pendingReplies === 0) afterRound(ctx, state); return; }
           ctx.ui.notify(`${s.meta.id} answered before your latest message; catching it up now`, "info");
           if (queued.length) { queued.splice(0); drawQueue(ctx); }
           void round(ctx, state, s); return;
@@ -942,7 +947,8 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     cycleNo++;
     publish({ author: "you", kind: "human", text: event.text });
     lastHumanId = events[events.length - 1]?.id ?? "";
-    if (paused) { heldWhilePaused = true; ctx.ui.notify("paused: logged, nobody answers until /committee resume", "warning"); return { action: "handled" }; }
+    lastHumanText = event.text;
+    if (paused) { heldWhilePaused = true; pausedTexts.push(event.text); ctx.ui.notify("paused: logged, nobody answers until /committee resume", "warning"); return { action: "handled" }; }
     // every seat is busy: the message is in the room already, so the first seat to finish reads it and
     // catches up; the round itself waits for a free seat
     const focus = focusOf(event.text);
@@ -957,7 +963,9 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     return { action: "handled" };
   });
   async function runCycles(ctx: ExtensionContext) {
-    const focus = focusOfQueue();
+    const texts = [...queued, ...pausedTexts];
+    const focus = cfg.tagRouting ? focusFromQueue(texts, seatTags()) : undefined;
+    pausedTexts.length = 0;
     if (queued.length) { queued.splice(0); drawQueue(ctx); }
     await round(ctx, newState(focus));
   }
