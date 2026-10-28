@@ -936,11 +936,16 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
 
   /** a human message must not end unanswered: when the round ended with no published reply since it, ask the seat that has spoken least, once, with no option to hold */
   let forcedFor = "";
+  let notedFor = "";
   const unanswered = () => {
     const i = events.map((e) => e.kind).lastIndexOf("human");
     return i >= 0 && !events.slice(i + 1).some((e) => e.kind === "speak");
   };
   const forceAnswer = (ctx: ExtensionContext, state: RoundState): boolean => {
+    if (lastHumanId && forcedFor === lastHumanId && unanswered() && notedFor !== lastHumanId) {
+      notedFor = lastHumanId;
+      publish({ author: "host", kind: "error", text: "nobody answered; asked one seat directly and it still had nothing to add" });
+    }
     if (!lastHumanId || forcedFor === lastHumanId || !unanswered()) return false;
     const pool = freeSeats().filter((s) => !state.focus || state.focus.has(s.meta.id));
     const seat = (pool.length ? pool : freeSeats()).sort((a, b) => a.stat.turns - b.stat.turns)[0];
