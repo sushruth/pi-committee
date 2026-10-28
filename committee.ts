@@ -949,7 +949,8 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     }
     if (!lastHumanId || forcedFor === lastHumanId || !unanswered()) return false;
     const pool = freeSeats().filter((s) => !state.focus || state.focus.has(s.meta.id));
-    const seat = (pool.length ? pool : freeSeats()).sort((a, b) => a.stat.turns - b.stat.turns)[0];
+    if (!pool.length) return false; // a tagged request waits for its recipient; an untagged seat must not take it
+    const seat = pool.sort((a, b) => a.stat.turns - b.stat.turns)[0];
     if (!seat) return false;
     forcedFor = lastHumanId;
     ctx.ui.notify(`nobody answered: asking ${seat.meta.id} directly`, "info");
