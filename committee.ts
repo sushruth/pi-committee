@@ -1,3 +1,4 @@
+import { reportedCost } from "./accounting.ts";
 // pi extension: the host for a committee conversation.
 //   pi --no-tools --no-mcp --no-skills --no-session --no-extensions --no-context-files --no-prompt-templates \
 //      -e ~/.agents/skills/committee-conversation/committee.ts
@@ -80,7 +81,7 @@ export default function (pi: ExtensionAPI) {
     if (booted) return; booted = true;
     for (const m of cfg.speakers) speakers.push(makeSeat(m));
     // usage events carry each call's numbers, so totals and the context bar survive a restart
-    for (const e of events) if (e.kind === "usage" && e.data) { const d = e.data as any; const st = byId(e.author)?.stat; if (st) { st.calls++; st.fresh += d.fresh ?? 0; st.cached += d.cached ?? 0; st.out += d.out ?? 0; st.cost += d.cost ?? 0; if (typeof d.ctx === "number") st.ctx = d.ctx; } }
+    for (const e of events) if (e.kind === "usage" && e.data) { const d = e.data as any; const st = byId(e.author)?.stat; if (st) { st.calls++; st.fresh += d.fresh ?? 0; st.cached += d.cached ?? 0; st.out += d.out ?? 0; st.cost += reportedCost(d, byId(e.author)?.meta.cli) ?? 0; if (typeof d.ctx === "number") st.ctx = d.ctx; } }
   };
   const former: Ghost[] = cfg.former ?? [];
   const byId = (id: string) => speakers.find((s) => s.meta.id === id);
@@ -152,9 +153,9 @@ export default function (pi: ExtensionAPI) {
   const account = (r: TurnResult, phase: string) => {
     const s = byId(r.speaker); if (!s) return;
     s.stat.calls++;
-    if (r.usage) { s.stat.fresh += r.usage.fresh; s.stat.cached += r.usage.cached; s.stat.out += r.usage.out; s.stat.cost += r.usage.cost ?? 0;
+    if (r.usage) { s.stat.fresh += r.usage.fresh; s.stat.cached += r.usage.cached; s.stat.out += r.usage.out; s.stat.cost += reportedCost(r.usage, s.meta.cli) ?? 0;
       if (typeof r.usage.ctx === "number") s.stat.ctx = r.usage.ctx; }
-    publish({ author: r.speaker, kind: "usage", text: `${phase}: fresh ${r.usage?.fresh ?? "?"} cached ${r.usage?.cached ?? "?"} out ${r.usage?.out ?? "?"}${r.usage?.cost != null ? ` $${r.usage.cost.toFixed(4)}` : ""}${r.resumed ? " (resumed)" : ""}`, data: { phase, ...r.usage, resumed: r.resumed, ok: r.ok } });
+    publish({ author: r.speaker, kind: "usage", text: `${phase}: fresh ${r.usage?.fresh ?? "?"} cached ${r.usage?.cached ?? "?"} out ${r.usage?.out ?? "?"}${r.usage?.cost != null ? ` $${r.usage.cost.toFixed(4)}` : ""}${r.resumed ? " (resumed)" : ""}`, data: { phase, ...r.usage, cli: s.meta.cli, resumed: r.resumed, ok: r.ok } });
   };
 
   // ---- UI: compact status line by default, /usage toggles the table; footer = totals
@@ -197,11 +198,12 @@ export default function (pi: ExtensionAPI) {
       const phases = new Map<string, { cost: number; calls: number; reported: number }>();
       for (const ev of events) {
         if (ev.kind !== "usage" || !byId(ev.author)) continue;
-        const usage = ev.data as { phase?: string; cost?: number } | undefined;
+        const usage = ev.data as { phase?: string; cost?: number; costScope?: string; cli?: string } | undefined;
         const phase = usage?.phase ?? "other";
         const entry = phases.get(phase) ?? { cost: 0, calls: 0, reported: 0 };
         entry.calls++;
-        if (typeof usage?.cost === "number" && Number.isFinite(usage.cost)) { entry.cost += usage.cost; entry.reported++; }
+        const cost = reportedCost(usage, byId(ev.author)?.meta.cli);
+        if (cost != null) { entry.cost += cost; entry.reported++; }
         phases.set(phase, entry);
       }
       const seatRows = [...speakers].sort((a, b) => b.stat.cost - a.stat.cost).flatMap((s) => [
@@ -211,7 +213,7 @@ export default function (pi: ExtensionAPI) {
       const phaseRows = [...phases].flatMap(([phase, entry]) => wrapTextWithAnsi(
         `${phase}: $${entry.cost.toFixed(4)} · ${entry.calls} calls · cost reported for ${entry.reported}/${entry.calls}`, inner));
       return frame(` cost · $${total.toFixed(3)} `, [...seatRows, ...phaseRows,
-        ...wrapTextWithAnsi(dim("cost as the providers report it; missing costs are excluded, not known to be free. Context = latest reported input / window, not a live meter. Billed tokens accumulate across calls; they are not a dollar-price breakdown."), inner)]);
+        ...wrapTextWithAnsi(dim("cost as the providers report it; missing costs and unverified legacy Claude costs are excluded, not free. Claude totals cover corrected calls only. Context = latest reported input / window, not a live meter. Billed tokens accumulate across calls; they are not a dollar-price breakdown."), inner)]);
     }
     if (openSeat === ABOUT) {
       const t = speakers.reduce((a, s) => ({ fresh: a.fresh + s.stat.fresh, cached: a.cached + s.stat.cached, out: a.out + s.stat.out, calls: a.calls + s.stat.calls, cost: a.cost + s.stat.cost }), { fresh: 0, cached: 0, out: 0, calls: 0, cost: 0 });

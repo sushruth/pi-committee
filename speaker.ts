@@ -1,3 +1,4 @@
+import { CumulativeCost } from "./accounting.ts";
 // One speaker = one native session on one CLI, kept open for the whole conversation
 // and resumed across host restarts by its session id. Every call carries only new
 // material; the CLI's own context/cache holds the rest. The JSON schema for a call
@@ -37,7 +38,7 @@ export interface SpeakerOpts {
 export interface ToolWork { calls: number; chars: number }
 export type Tools = "read" | "all";
 
-export interface Usage { fresh: number; cached: number; out: number; cost?: number; /** input of the last model step: the session's live context size */ ctx?: number }
+export interface Usage { fresh: number; cached: number; out: number; cost?: number; costScope?: "call"; /** input of the last model step: the session's live context size */ ctx?: number }
 
 export interface TurnResult {
   speaker: string;
@@ -80,6 +81,7 @@ export class Speaker {
   private oc?: { base: string; auth: string };
   private work: ToolWork = { calls: 0, chars: 0 };
   private lastCtx?: number;
+  private claudeCost = new CumulativeCost();
   private nudged = false;
   private codexTotal?: any;
   private codexBase?: any;
@@ -99,6 +101,7 @@ export class Speaker {
   // ---------- claude / codex: long-lived process
   private spawnLongLived(): ChildProcess {
     const { cli, model, cwd, session_id } = this.opts;
+    this.claudeCost = new CumulativeCost();
     const args = cli === "claude"
       ? ["-p", "--verbose", "--model", model,
          "--input-format", "stream-json", "--output-format", "stream-json",
@@ -151,7 +154,7 @@ export class Speaker {
     if (ev.type !== "result") return;
     if (ev.is_error) return this.settle({ speaker: this.id, ok: false, error: String(ev.result ?? ev.subtype), raw: ev });
     const u = ev.usage ?? {};
-    this.settleJson(String(ev.result ?? ""), ev, { fresh: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), cached: u.cache_read_input_tokens ?? 0, out: u.output_tokens ?? 0, cost: ev.total_cost_usd, ctx: this.lastCtx });
+    this.settleJson(String(ev.result ?? ""), ev, { fresh: (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), cached: u.cache_read_input_tokens ?? 0, out: u.output_tokens ?? 0, cost: this.claudeCost.next(ev.total_cost_usd), costScope: "call", ctx: this.lastCtx });
   }
 
   private onCodex(ev: any) {

@@ -1,0 +1,17 @@
+import { strict as assert } from "node:assert";
+import { CumulativeCost, reportedCost } from "./accounting.ts";
+const cost = new CumulativeCost();
+assert.equal(cost.next(1), 1);
+assert.equal(cost.next(3), 2);
+assert.equal(cost.next(undefined), undefined);
+assert.equal(cost.next(NaN), undefined);
+assert.equal(cost.next(-1), undefined);
+assert.equal(cost.next(3), 0);
+assert.equal(cost.next(0.5), 0.5);
+assert.equal(new CumulativeCost().next(2), 2);
+assert.equal(reportedCost({cost: 24}, "claude"), undefined);
+assert.equal(reportedCost({cost: 0.1, costScope: "call"}, "claude"), 0.1);
+assert.equal(reportedCost({cost: 0}, "opencode"), 0);
+assert.equal(reportedCost(undefined, "codex"), undefined);
+assert.equal(reportedCost({cost: NaN}, "pi"), undefined);
+console.log("13 accounting assertions passed");
