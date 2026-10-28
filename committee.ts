@@ -1,3 +1,4 @@
+import { focusFromText, focusFromQueue } from "./routing.ts";
 import { reportedCost } from "./accounting.ts";
 // pi extension: the host for a committee conversation.
 //   pi --no-tools --no-mcp --no-skills --no-session --no-extensions --no-context-files --no-prompt-templates \
@@ -32,6 +33,8 @@ interface Config {
   brief?: string;
   timeoutSeconds?: number;
   /** autonomous rounds per human message before the room stops on its own: a runaway guard, not the normal stop (default 8) */
+  /** poll only seats the human message tags (@all asks everyone); off by default */
+  tagRouting?: boolean;
   maxRounds?: number;
   /** per call, for seats with tools (default 600) */
   toolTimeoutSeconds?: number;
@@ -827,18 +830,22 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   let pendingReplies = 0;
   const cap = () => Math.max(1, cfg.maxRounds ?? 8);
   /** per-round bookkeeping, passed explicitly so overlapping rounds can't reset each other */
-  interface RoundState { left: number; spoke: number }
+  interface RoundState { left: number; spoke: number; focus?: Set<string> }
   /** from the third round on, ask seats to converge: speak only if the answer changes or a direct question is open */
   const converge = (st: RoundState) => {
     const round = cap() - st.left;
     return round >= 3 ? `This is round ${round} on the same human request. Speak only if you change the answer, correct a fact, or a direct question to you is still open. Otherwise hold; agreement and restating are not needed.\n` : "";
   };
-  const newState = (): RoundState => ({ left: cap() - 1, spoke: 0 });
+  const newState = (focus?: Set<string>): RoundState => ({ left: cap() - 1, spoke: 0, focus });
+  /** opt-in (cfg.tagRouting): a human message that tags seats is polled only on those seats; @all/@everyone/@others or no tag asks everyone */
+  const seatTags = () => speakers.map((q) => ({ id: q.meta.id, tag: tagOf(q.meta.id) }));
+  const focusOf = (text: string) => (cfg.tagRouting ? focusFromText(text, seatTags()) : undefined);
+  const focusOfQueue = () => (cfg.tagRouting ? focusFromQueue(queued, seatTags()) : undefined);
   const syncBusy = () => { busy = speakers.some((s) => s.inflight); };
   const freeSeats = () => speakers.filter((s) => !s.inflight);
 
   async function round(ctx: ExtensionContext, state: RoundState, only?: (typeof speakers)[number]): Promise<number> {
-    const free = only ? (only.inflight ? [] : [only]) : freeSeats();
+    const free = only ? (only.inflight ? [] : [only]) : freeSeats().filter((s) => !state.focus || state.focus.has(s.meta.id));
     if (!free.length) return 0;
     cycleNo++;
     if (!only) state.spoke = 0;
@@ -923,7 +930,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (paused) return;
     if (queued.length) {
       // already published at input time; only the round was held back
-      queued.splice(0); drawQueue(ctx); const fresh = newState(); void round(ctx, fresh); return;
+      const focus = focusOfQueue(); queued.splice(0); drawQueue(ctx); const fresh = newState(focus); void round(ctx, fresh); return;
     }
     if (state.spoke > 0 && state.left > 0) { state.left--; void round(ctx, state); }
     else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds (safety limit); type again to continue`, "info"); }
@@ -938,18 +945,21 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (paused) { heldWhilePaused = true; ctx.ui.notify("paused: logged, nobody answers until /committee resume", "warning"); return { action: "handled" }; }
     // every seat is busy: the message is in the room already, so the first seat to finish reads it and
     // catches up; the round itself waits for a free seat
-    if (speakers.length && freeSeats().length === 0) {
+    const focus = focusOf(event.text);
+    const eligible = freeSeats().filter((s) => !focus || focus.has(s.meta.id));
+    if (speakers.length && eligible.length === 0) {
       queued.push(event.text); drawQueue(ctx);
       ctx.ui.setStatus("committee", `waiting · ${queued.length}`);
       ctx.ui.notify(`waiting for a free seat (${queued.length}): your message is already in the room and will be read when a seat returns · /queue lists`, "info");
       return { action: "handled" };
     }
-    await round(ctx, newState());
+    await round(ctx, newState(focus));
     return { action: "handled" };
   });
   async function runCycles(ctx: ExtensionContext) {
+    const focus = focusOfQueue();
     if (queued.length) { queued.splice(0); drawQueue(ctx); }
-    await round(ctx, newState());
+    await round(ctx, newState(focus));
   }
 
   pi.on("session_shutdown", async () => { if (ticker) clearInterval(ticker); saveSessions(); for (const s of speakers) s.session.close(); });
