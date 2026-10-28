@@ -718,7 +718,8 @@ export default function (pi: ExtensionAPI) {
       invalidate() {},
       render(width: number) {
         const pad = " ".repeat(outputPad);
-        const bar = ansi(color, "▏");
+        // a solid-background cell (plus one space) instead of a thin glyph, so the line is continuous whatever the terminal's line spacing
+        const bar = `\x1b[48;5;${color}m \x1b[49m `;
         const inner = Math.max(20, width - outputPad - 2);
         // speech is markdown (bold, lists, code); tool lines stay plain dim text. tags are colored after rendering so ANSI never sits inside the markdown source
         let body: string[];
@@ -728,7 +729,7 @@ export default function (pi: ExtensionAPI) {
         const w = (d.data as any)?.tools as { calls: number; chars: number } | undefined;
         // name on the left, cli:model #thinking (and the tool-work marker) right-aligned on the same line
         const right = seat ? ansi(244, (w ? `⚙ ${w.calls} tool call${w.calls === 1 ? "" : "s"}, ${fmt(w.chars)} chars   ` : "") + seatMeta(seat)) : "";
-        const gap = width - outputPad - 1 - visibleWidth(name) - visibleWidth(right);
+        const gap = width - outputPad - 2 - visibleWidth(name) - visibleWidth(right);
         const head = gap >= 2 ? `${name}${" ".repeat(gap)}${right}` : name;
         const who = seat && gap < 2 ? [`${pad}${bar}${right}`] : [];
         return [`${pad}${bar}${head}`, ...who, ...body.map((l) => `${pad}${bar}${l}`)];
