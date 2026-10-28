@@ -20,6 +20,7 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { Speaker, codexModels, modelWindow, opencodeVariants, type Cli, type Tools, type TurnResult } from "./speaker.ts";
+import { planRoomStart, roomBinding, RoomGeneration } from "./lifecycle.ts";
 import intentionSchema from "./schemas/intention.schema.json";
 import responseSchema from "./schemas/response.schema.json";
 
@@ -378,13 +379,18 @@ export default function (pi: ExtensionAPI) {
         return [truncateToWidth(left + contextBar(Math.max(10, Math.min(40, width - visibleWidth(left) - 1)), t.window), width)];
       },
     });
-    // `pi --committee` always starts a new conversation: the previous room is archived, never deleted.
-    // an old room comes back through /committee sessions.
-    if (pi.getFlag("committee") === true) {
-      freshRoom();
-      await enableMode(ctx);
-      return;
+    // what this pi session is: a new one gets a fresh room when --committee is set; a resumed or reloaded one goes back to the room it was bound to
+    const bound = roomBinding((ctx.sessionManager?.getEntries?.() ?? []) as any);
+    const plan = planRoomStart(_e.reason, pi.getFlag("committee") === true, bound && existsSync(join(roomsDir, bound)) ? bound : undefined);
+    if (plan.kind === "restore") { if (plan.roomId !== roomId) switchRoom(plan.roomId); await enableMode(ctx); return; }
+    if (plan.kind === "fork") {
+      // a fork keeps the transcript but not the seats' memory: copy events only into a new room
+      const src = join(roomsDir, plan.sourceRoomId, "events.jsonl"), id = newRoomId();
+      mkdirSync(join(roomsDir, id), { recursive: true });
+      if (existsSync(src)) writeFileSync(join(roomsDir, id, "events.jsonl"), readFileSync(src, "utf8"));
+      switchRoom(id); await enableMode(ctx); return;
     }
+    if (plan.kind === "fresh") { freshRoom(); await enableMode(ctx); return; }
     // pi starts as plain pi; a folder that has a committee gets the clickable hint instead of a toast
     if (showHint(ctx)) return;
     ctx.ui.notify(cfg.speakers.length ? "committee: /committee on to turn it on" : "committee: no seats in this folder yet · /committee on to set up", "info");
@@ -594,7 +600,9 @@ export default function (pi: ExtensionAPI) {
   pi.registerShortcut("alt+p", { description: "committee: pause the seats", handler: (ctx) => pause(ctx) });
   // ---- one directory per conversation; switching never deletes anything
   /** move the room this run is speaking in, loading its log and its seat sessions */
+  const roomGen = new RoomGeneration(); // a reply that started in another room is dropped, never published into this one
   const switchRoom = (id: string) => {
+    roomGen.advance(); pendingReplies = 0;
     for (const s of speakers) { try { s.session.close(); } catch {} }
     speakers.length = 0; former.length = 0; cfg.former = [];
     for (const k of Object.keys(saved)) delete saved[k];
@@ -790,6 +798,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     for (const s of free) setState(s.meta.id, "thinking");
     // a seat that has seen no new public event since its last poll has nothing to decide; skip the call
     const seen = events.filter((e) => PUBLIC.includes(e.kind)).length;
+    const roundTok = roomGen.capture();
     const intents = await Promise.all(free.map((s) => {
       if (s.polledAt === seen) {
         setState(s.meta.id, "listening");
@@ -804,6 +813,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
           account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r;
         });
     }));
+    if (!roomGen.accepts(roundTok)) return 0; // the room changed while seats were thinking
     const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${JSON.stringify(r.payload)}`).join("\n");
     if (!only) {
       publish({ author: "host", kind: "intention", text: summary });
@@ -828,10 +838,12 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
 
   /** fire a reply without awaiting it; the seat stays on the floor while it works, everyone else keeps going */
   const dispatch = (ctx: ExtensionContext, s: (typeof speakers)[number], extra: string, asHuman: string, state: RoundState) => {
+    const tok = roomGen.capture();
     s.inflight = true; pendingReplies++; syncBusy();
     setState(s.meta.id, s.meta.tools ? "working" : "replying");
     void s.session.send(packet(s, "respond", extra), responseSchema, budget(s))
       .then((r) => {
+        if (!roomGen.accepts(tok)) return;
         account(r, "respond");
         if (r.ok) s.sent = s.pendingSent ?? s.sent;
         state.spoke += takeReply(r);
@@ -846,6 +858,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         if (pendingReplies === 0) afterRound(ctx, state);
       })
       .catch((e) => {
+        if (!roomGen.accepts(tok)) return;
         publish({ author: s.meta.id, kind: "error", text: `respond failed: ${String((e as any)?.message ?? e)}` });
         s.inflight = false; pendingReplies--; syncBusy(); saveSessions(); refresh();
         if (pendingReplies === 0) afterRound(ctx, state);
