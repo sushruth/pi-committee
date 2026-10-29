@@ -202,7 +202,9 @@ export default function (pi: ExtensionAPI) {
     const ev: Event = { id: `event-${events.length + 1}`, cycle: cycleNo, ...e };
     record(ev);
     appendFileSync(logPath, JSON.stringify({ ts: Date.now(), ...ev }) + "\n");
-    if (PUBLIC.includes(ev.kind)) pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
+    // PUBLIC decides what reaches a seat's delta; display is a separate question. A deliberation
+    // round is shown to the human and never sent to seats, so it gets its own display path.
+    if (PUBLIC.includes(ev.kind) || ev.kind === "deliberation") pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
     if (ev.kind === "human") mirror(ev.text);
     return ev;
   };
