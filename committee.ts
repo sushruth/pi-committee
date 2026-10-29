@@ -816,7 +816,8 @@ export default function (pi: ExtensionAPI) {
         invalidate() {},
         render(width: number) {
           const pad = " ".repeat(outputPad);
-          const head = `⟳ deliberating · turn ${dd.turn ?? 1} · ${dd.seats ?? 0} seats · ${Math.round((dd.ms ?? 0) / 1000)}s`;
+          // the id is printed so /committee deliberation <id> is discoverable, not guessable
+          const head = `⟳ deliberating · turn ${dd.turn ?? 1} · ${dd.seats ?? 0} seats · ${Math.round((dd.ms ?? 0) / 1000)}s · ${d.id}`;
           const line = `${pad}${theme.fg("dim", head)} ${theme.fg("dim", "— " + first)}`;
           return [truncateToWidth(line, width)];
         },
