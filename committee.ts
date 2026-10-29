@@ -44,7 +44,7 @@ interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona
 interface Ghost { id: string; cli: Cli; model: string; thinking?: string; left: string }
 type Kind = "human" | "speak" | "error" | "intention" | "usage" | "tool";
 interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown }
-interface Stat { state: string; since: number; activity?: string; ctx?: number; window?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; intentRound?: number; lastReply?: string }
+interface Stat { state: string; since: number; activity?: string; ctx?: number; window?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; intentStamp?: number; lastReply?: string }
 interface Saved { cli: Cli; model: string; thinking?: string; tools?: Tools; session_id?: string; sent: number; rules?: string }
 const PUBLIC: Kind[] = ["human", "speak", "error"]; // "tool" events from older logs are history only
 
@@ -332,6 +332,7 @@ export default function (pi: ExtensionAPI) {
   const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let delibTicker: ReturnType<typeof setInterval> | undefined;
   let delibRound = 1; // the round seats are currently deciding in, for the block's header
+  let delibStamp = 0; // cycle id of that round: unique across the whole room, unlike the per-request counter
   const drawDeliberating = () => {
     if (!ui) return;
     const deciding = speakers.filter((s) => s.stat.state === "thinking");
@@ -348,7 +349,7 @@ export default function (pi: ExtensionAPI) {
     for (const s of speakers) {
       const c = colorOf(s.meta.id);
       // only this round's intention: lastIntent survives from earlier rounds and would read as stale
-      const fresh = s.stat.intentRound === delibRound;
+      const fresh = s.stat.intentStamp === delibStamp;
       const what = s.stat.state === "thinking" ? ansi(244, "deciding…") : fresh && s.stat.lastIntent ? ansi(244, s.stat.lastIntent) : "";
       if (!what) continue;
       lines.push(`  ${ansi(c, s.meta.id)} ${what}`);
@@ -901,6 +902,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (!free.length) return 0;
     cycleNo++;
     delibRound = state.n;
+    delibStamp = cycleNo;
     if (!only) state.spoke = 0;
     for (const s of free) setState(s.meta.id, "thinking");
     // a seat that has seen no new public event since its last poll has nothing to decide; skip the call
@@ -917,7 +919,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         .then((r) => {
           if (r.ok) { s.polledAt = seen; s.sent = s.pendingSent ?? s.sent; }
           s.inflight = false; syncBusy();
-          account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) { st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; st.intentRound = state.n; } setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r;
+          account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) { st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; st.intentStamp = cycleNo; } setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r;
         });
     }));
     if (!roomGen.accepts(roundTok)) return 0; // the room changed while seats were thinking
