@@ -434,7 +434,6 @@ export default function (pi: ExtensionAPI) {
     boot();
     if (shown) return; shown = true;
     if (speakers.length) await checkEngines(ctx);
-    for (const ev of events) if (PUBLIC.includes(ev.kind)) pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
     const resumed = speakers.filter((s) => s.sent > 0).map((s) => s.meta.id);
     if (events.length) ctx.ui.notify(`replayed ${events.filter((e) => PUBLIC.includes(e.kind)).length} messages; resuming sessions for ${resumed.length ? resumed.join(", ") : "nobody"}`, "info");
   };
@@ -721,7 +720,12 @@ export default function (pi: ExtensionAPI) {
       }
       const want = args.trim() === "on" ? true : args.trim() === "off" ? false : !active;
       if (busy && !want) return ctx.ui.notify("wait for the committee to settle first", "warning");
-      if (want) return enableMode(ctx);
+      if (want) {
+        // /committee on means "turn on for this thread": a thread not bound to the folder's last room starts a fresh one; /resume-committee is how to go back
+        const bound = roomBinding((ctx.sessionManager?.getEntries?.() ?? []) as any);
+        if (!active && events.length && bound !== roomId) switchRoom(newRoomId());
+        return enableMode(ctx);
+      }
       active = false; applyMode(ctx);
       ctx.ui.notify("committee mode off", "info");
     },
