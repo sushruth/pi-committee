@@ -714,7 +714,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => { await resumeRoom(ctx); },
   });
   pi.registerCommand("committee", {
-    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; brief <text|path> = what seats should know about this folder (- clears); sessions = pick an earlier room to resume (the current one stays on disk); fresh = archive this room and start a new conversation with the same seats; reset = delete this folder's committee.json and committee/",
+    description: "Toggle committee mode: on = your input goes to the committee; off = pi works as usual; pause/resume = hold the seats; brief <text|path> = what seats should know about this folder (- clears); deliberation [event] = expand the last collapsed deliberation round; sessions = pick an earlier room to resume (the current one stays on disk); fresh = archive this room and start a new conversation with the same seats; reset = delete this folder's committee.json and committee/",
     handler: async (args, ctx) => {
       if (args.trim() === "pause") return pause(ctx);
       if (args.trim() === "resume") {
@@ -737,6 +737,15 @@ export default function (pi: ExtensionAPI) {
         return ctx.ui.notify(`started a fresh conversation (room ${roomId})`, "info");
       }
       if (args.trim() === "sessions") return resumeRoom(ctx);
+      // expand a collapsed deliberation line: the transcript shows one line, the detail lives here
+      if (args.trim().startsWith("deliberation")) {
+        const want = args.trim().slice(12).trim();
+        const rounds = events.filter((e) => e.kind === "deliberation");
+        const pickOne = want ? rounds.find((e) => e.id === want) : rounds[rounds.length - 1];
+        if (!pickOne) return ctx.ui.notify(want ? `no deliberation round ${want}` : "no deliberation yet in this room", "info");
+        const d = (pickOne.data ?? {}) as { turn?: number; seats?: number; ms?: number };
+        return ctx.ui.notify(`deliberation ${pickOne.id} · turn ${d.turn ?? 1} · ${d.seats ?? 0} seats · ${Math.round((d.ms ?? 0) / 1000)}s\n${pickOne.text}`, "info");
+      }
       if (args.trim() === "reset") {
         if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
         const n = events.filter((e) => PUBLIC.includes(e.kind)).length;
