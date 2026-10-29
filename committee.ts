@@ -42,7 +42,7 @@ interface Config {
 interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona?: string; tools?: Tools }
 // a seat that left the room; its lines stay in the transcript, it stays visible as a pale dot
 interface Ghost { id: string; cli: Cli; model: string; thinking?: string; left: string }
-type Kind = "human" | "speak" | "error" | "intention" | "usage" | "tool";
+type Kind = "human" | "speak" | "error" | "intention" | "deliberation" | "usage" | "tool";
 interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown }
 interface Stat { state: string; since: number; activity?: string; ctx?: number; window?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; intentStamp?: number; lastReply?: string }
 interface Saved { cli: Cli; model: string; thinking?: string; tools?: Tools; session_id?: string; sent: number; rules?: string }
@@ -797,6 +797,20 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer("committee", (message, { outputPad }, theme) => {
     const d = message.details as Event;
     const color = d.kind === "human" ? 250 : d.kind === "error" ? 196 : d.kind === "tool" ? 244 : colorOf(d.author);
+    if (d.kind === "deliberation") {
+      // one line per deliberate round, not a block: the detail stays in the file, the room sees a summary
+      const dd = (d.data ?? {}) as { turn?: number; seats?: number; ms?: number };
+      const first = String(message.content).split("\n")[0] ?? "";
+      return {
+        invalidate() {},
+        render(width: number) {
+          const pad = " ".repeat(outputPad);
+          const head = `⟳ deliberating · turn ${dd.turn ?? 1} · ${dd.seats ?? 0} seats · ${Math.round((dd.ms ?? 0) / 1000)}s`;
+          const line = `${pad}${theme.fg("dim", head)} ${theme.fg("dim", "— " + first)}`;
+          return [truncateToWidth(line, width)];
+        },
+      };
+    }
     const rep = (d.data as any)?.repeat;
     const name = d.kind === "human" ? theme.fg("accent", d.author) : ansi(d.kind === "tool" ? colorOf(d.author) : color, d.author + (d.kind === "error" ? " ✗" : d.kind === "tool" ? " ⚙ " + (d.data as any)?.tool : rep ? ` ↺ already answered (${rep})` : ""));
     return {
@@ -884,10 +898,13 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   /** appetite for another round: 1 at the start, halving every 4 rounds, never 0. A signal to seats, not a gate. */
   const appetite = (n: number) => Math.pow(2, -(n - 1) / 4);
   const WRAP_UP = 0.1;
+  /** deliberation decays at half the rate of speaking: arguing longer is fine, so 2^(-n/8) */
+  const deliberation = (n: number) => Math.pow(2, -n / 8);
   const converge = (st: RoundState) => {
-    const a = appetite(st.n);
+    const a = appetite(st.n), dl = deliberation(st.n);
     if (st.n < 2) return "";
-    return `Appetite for more turns on this request: ${Math.round(a * 100)}% (round ${st.n}). The lower it is, the more the room should pick and decide soon. It is a signal, not a rule.\n`;
+    return `Appetite for more turns on this request: ${Math.round(a * 100)}% (round ${st.n}). The lower it is, the more the room should pick and decide soon. It is a signal, not a rule.\n`
+      + `Deliberation budget at round ${st.n}: ${Math.round(dl * 100)}%. Arguing is cheaper than another round of speech, so this decays half as fast. Use it to agree on who does what before anyone replies.\n`;
   };
   const newState = (focus?: Set<string>): RoundState => ({ n: 1, spoke: 0, focus });
   /** opt-in (cfg.tagRouting): a human message that tags seats is polled only on those seats; @all/@everyone/@others or no tag asks everyone */
@@ -910,6 +927,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     // a seat that has seen no new public event since its last poll has nothing to decide; skip the call
     const seen = events.filter((e) => PUBLIC.includes(e.kind)).length;
     const roundTok = roomGen.capture();
+    const roundStart = Date.now();
     const intents = await Promise.all(free.map((s) => {
       if (s.polledAt === seen) {
         setState(s.meta.id, "listening");
@@ -934,7 +952,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     };
     const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${intentionLine(r.payload)}`).join("\n");
     if (!only) {
-      publish({ author: "host", kind: "intention", text: summary });
+      publish({ author: "host", kind: "deliberation", text: summary, data: { turn: state.n, seats: free.length, ms: Date.now() - roundStart } });
       for (const r of intents) if (!r.ok) { diag(r, "intention"); publish({ author: r.speaker, kind: "error", text: `intention failed: ${r.error}` }); }
     }
     saveSessions();
