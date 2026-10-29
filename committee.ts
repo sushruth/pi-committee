@@ -331,6 +331,7 @@ export default function (pi: ExtensionAPI) {
   // the round ends, which is why it needs no history.
   const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let delibTicker: ReturnType<typeof setInterval> | undefined;
+  let delibRound = 1; // the round seats are currently deciding in, for the block's header
   const drawDeliberating = () => {
     if (!ui) return;
     const deciding = speakers.filter((s) => s.stat.state === "thinking");
@@ -343,7 +344,7 @@ export default function (pi: ExtensionAPI) {
     const now = Date.now();
     const age = Math.max(...deciding.map((s) => now - s.stat.since));
     const frame = SPIN[Math.floor(now / 120) % SPIN.length];
-    const lines = [`${frame} ${ansi(244, `deliberating · ${deciding.length} deciding · ${elapsed(age)}`)}`];
+    const lines = [`${frame} ${ansi(244, `deliberating · turn ${delibRound} · ${deciding.length} deciding · ${elapsed(age)}`)}`];
     for (const s of speakers) {
       const c = colorOf(s.meta.id);
       const what = s.stat.state === "thinking" ? ansi(244, "deciding…") : s.stat.lastIntent ? ansi(244, s.stat.lastIntent) : "";
@@ -897,6 +898,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     const free = only ? (only.inflight ? [] : [only]) : freeSeats().filter((s) => !state.focus || state.focus.has(s.meta.id));
     if (!free.length) return 0;
     cycleNo++;
+    delibRound = state.n;
     if (!only) state.spoke = 0;
     for (const s of free) setState(s.meta.id, "thinking");
     // a seat that has seen no new public event since its last poll has nothing to decide; skip the call
