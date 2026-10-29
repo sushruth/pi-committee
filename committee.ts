@@ -36,7 +36,6 @@ interface Config {
   /** autonomous rounds per human message before the room stops on its own: a runaway guard, not the normal stop (unset: no limit) */
   /** poll only seats the human message tags (@all asks everyone); off by default */
   tagRouting?: boolean;
-  maxRounds?: number;
   /** per call, for seats with tools (default 600) */
   toolTimeoutSeconds?: number;
 }
@@ -876,14 +875,15 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   // it missed as one delta batch when it returns.
   let lastHumanId = "";
   let pendingReplies = 0;
-  /** no ceiling unless the setup asks for one: a quiet round is what ends a conversation */
-  const cap = () => (cfg.maxRounds && cfg.maxRounds > 0 ? cfg.maxRounds : Infinity);
   /** per-round bookkeeping, passed explicitly so overlapping rounds can't reset each other */
   interface RoundState { n: number; spoke: number; focus?: Set<string> }
-  /** from the third round on, ask seats to converge: speak only if the answer changes or a direct question is open */
+  /** appetite for another round: 1 at the start, halving every 4 rounds, never 0. A signal to seats, not a gate. */
+  const appetite = (n: number) => Math.pow(2, -(n - 1) / 4);
+  const WRAP_UP = 0.1;
   const converge = (st: RoundState) => {
-    const round = st.n;
-    return round >= 3 ? `This is round ${round} on the same human request. Speak only if you change the answer, correct a fact, or a direct question to you is still open. Otherwise hold; agreement and restating are not needed.\n` : "";
+    const a = appetite(st.n);
+    if (st.n < 2) return "";
+    return `Appetite for more turns on this request: ${Math.round(a * 100)}% (round ${st.n}). The lower it is, the more the room should pick and decide soon. It is a signal, not a rule.\n`;
   };
   const newState = (focus?: Set<string>): RoundState => ({ n: 1, spoke: 0, focus });
   /** opt-in (cfg.tagRouting): a human message that tags seats is polled only on those seats; @all/@everyone/@others or no tag asks everyone */
@@ -936,14 +936,19 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (!candidates.length) { if (pendingReplies === 0 && !paused) { ctx.ui.setStatus("committee", "idle"); afterRound(ctx, state); } return 0; } // nobody speaks: still deliver anything queued meanwhile
 
     const asHuman = lastHumanId;
-    const alone = candidates.length === 1;
-    for (const s of candidates) {
+    // appetite is nearly gone: the last seat in the list that wanted to speak says why the room could not pick, and the rest hold
+    const wrap = appetite(state.n) < WRAP_UP;
+    const speakers_ = wrap ? candidates.slice(-1) : candidates;
+    for (const s of candidates) if (!speakers_.includes(s)) setState(s.meta.id, "listening");
+    const alone = speakers_.length === 1;
+    for (const s of speakers_) {
+      if (wrap) { dispatch(ctx, s, `Appetite for more turns is below 10%. Say in one short reply why the room could not settle who speaks or what to decide, then stop. The human or another seat can carry on from there. Action "speak".`, asHuman, state); continue; }
       const extra = alone
         ? `Nobody else wants to speak this cycle; you have the floor.${s.meta.tools ? " Use your tools now if your intention needed a lookup." : ""} Put the contribution in text with action "speak".\n`
         : `Everyone's intentions:\n${summary}\nHold (action wait or silent, empty text) or respond now (action speak, contribution in text).${s.meta.tools ? " If you respond and your intention needed a lookup, use your tools first." : ""}\n`;
       dispatch(ctx, s, extra, asHuman, state);
     }
-    return candidates.length;
+    return speakers_.length;
   }
 
   /** fire a reply without awaiting it; the seat stays on the floor while it works, everyone else keeps going */
@@ -1009,11 +1014,11 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
       const focus = focusOfQueue(); queued.splice(0); drawQueue(ctx); const fresh = newState(focus); void round(ctx, fresh); return;
     }
     if (state.spoke === 0 && forceAnswer(ctx, state)) return;
-    if (state.spoke > 0 && state.n < cap()) {
+    if (state.spoke > 0 && appetite(state.n) < WRAP_UP) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify("the room has said why it could not settle; your turn, or ask any seat to carry on", "info"); return; }
+    if (state.spoke > 0) {
       state.n++;
-      if (state.n === 9) ctx.ui.notify(`round 9 on this request, $${speakers.reduce((a, s) => a + s.stat.cost, 0).toFixed(2)} spent in the room so far; still going, /committee pause to stop`, "info");
       void round(ctx, state);
-    } else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds (maxRounds in committee.json); type again to continue`, "info"); }
+    }
   };
 
   pi.on("input", async (event, ctx) => {
