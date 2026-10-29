@@ -42,11 +42,13 @@ interface Config {
 interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona?: string; tools?: Tools }
 // a seat that left the room; its lines stay in the transcript, it stays visible as a pale dot
 interface Ghost { id: string; cli: Cli; model: string; thinking?: string; left: string }
-type Kind = "human" | "speak" | "error" | "intention" | "deliberation" | "usage" | "tool";
+type Kind = "human" | "speak" | "error" | "intention" | "deliberation" | "phase" | "usage" | "tool";
 interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown }
 interface Stat { state: string; since: number; activity?: string; ctx?: number; window?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; intentStamp?: number; lastReply?: string }
 interface Saved { cli: Cli; model: string; thinking?: string; tools?: Tools; session_id?: string; sent: number; rules?: string }
 const PUBLIC: Kind[] = ["human", "speak", "error"]; // "tool" events from older logs are history only
+// only the newest intention round stays on screen: older rows render empty, the payload stays in events.jsonl
+let latestIntentionsId: string | null = null;
 
 export default function (pi: ExtensionAPI) {
   const cwd = process.cwd();
@@ -204,7 +206,7 @@ export default function (pi: ExtensionAPI) {
     appendFileSync(logPath, JSON.stringify({ ts: Date.now(), ...ev }) + "\n");
     // PUBLIC decides what reaches a seat's delta; display is a separate question. A deliberation
     // round is shown to the human and never sent to seats, so it gets its own display path.
-    if (PUBLIC.includes(ev.kind) || ev.kind === "deliberation") pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
+    if (PUBLIC.includes(ev.kind) || ev.kind === "deliberation" || ev.kind === "phase") pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
     if (ev.kind === "human") mirror(ev.text);
     return ev;
   };
@@ -215,6 +217,7 @@ export default function (pi: ExtensionAPI) {
       if (!line.trim()) continue;
       const e = JSON.parse(line);
       if (e.kind === "human") c++;
+      if ((e.data as any)?.status === "intentions") latestIntentionsId = e.id;
       record({ id: e.id, cycle: e.cycle ?? c, author: e.author, text: e.text, kind: e.kind, data: e.data });
     }
   }
@@ -335,6 +338,7 @@ export default function (pi: ExtensionAPI) {
   let delibTicker: ReturnType<typeof setInterval> | undefined;
   let delibRound = 1; // the round seats are currently deciding in, for the block's header
   let delibStamp = 0; // cycle id of that round: unique across the whole room, unlike the per-request counter
+  let delibLive = ""; // last words out of the off-the-record round, so the line says what is being said, not just who
   const drawDeliberating = () => {
     if (!ui) return;
     const deciding = speakers.filter((s) => s.stat.state === "thinking");
@@ -347,15 +351,10 @@ export default function (pi: ExtensionAPI) {
     const now = Date.now();
     const age = Math.max(...deciding.map((s) => now - s.stat.since));
     const frame = SPIN[Math.floor(now / 120) % SPIN.length];
-    const lines = [`${frame} ${ansi(244, `deliberating · turn ${delibRound} · ${deciding.length} deciding · ${elapsed(age)}`)}`];
-    for (const s of speakers) {
-      const c = colorOf(s.meta.id);
-      // only this round's intention: lastIntent survives from earlier rounds and would read as stale
-      const fresh = s.stat.intentStamp === delibStamp;
-      const what = s.stat.state === "thinking" ? ansi(244, "deciding…") : fresh && s.stat.lastIntent ? ansi(244, s.stat.lastIntent) : "";
-      if (!what) continue;
-      lines.push(`  ${ansi(c, s.meta.id)} ${what}`);
-    }
+    // one line, not a panel: the same row rewrites itself as seats think and speak
+    const names = deciding.map((s) => ansi(colorOf(s.meta.id), s.meta.id)).join(" ");
+    const said = delibLive ? ` · ${delibLive}` : "";
+    const lines = [`${frame} ${ansi(244, `deliberating · turn ${delibRound} · ${names} · ${elapsed(age)}${said}`)}`];
     ui.setWidget("committee-deliberating", lines, { placement: "aboveEditor" });
   };
   const refresh = () => {
@@ -808,17 +807,34 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer("committee", (message, { outputPad }, theme) => {
     const d = message.details as Event;
     const color = d.kind === "human" ? 250 : d.kind === "error" ? 196 : d.kind === "tool" ? 244 : colorOf(d.author);
+    if (d.kind === "phase") {
+      // one rule per speaking episode, not one per turn: the turns are detail, the episode is the unit
+      return {
+        invalidate() {},
+        render(width: number) {
+          const dd = (d.data ?? {}) as { seats?: number };
+          const label = `── committee speaks · ${dd.seats ?? 0} seats · ${d.id} `;
+          return [truncateToWidth(theme.fg("dim", label.padEnd(width - outputPad, "─")), width)];
+        },
+      };
+    }
     if (d.kind === "deliberation") {
-      // one line per deliberate round, not a block: the detail stays in the file, the room sees a summary
-      const dd = (d.data ?? {}) as { turn?: number; seats?: number; ms?: number };
+      // one line per round, not a block: the detail stays in the file, the room sees a summary.
+      // Intention rounds are status, not conversation: they stay in the log and never take a row.
+      const dd = (d.data ?? {}) as { turn?: number; seats?: number; ms?: number; status?: string };
+      if (dd.status === "intentions") return { invalidate() {}, render: () => [] };
       const first = String(message.content).split("\n")[0] ?? "";
       return {
         invalidate() {},
         render(width: number) {
           const pad = " ".repeat(outputPad);
           // the id is printed so /committee deliberation <id> is discoverable, not guessable
-          const head = `✓ deliberation · turn ${dd.turn ?? 1} · ${dd.seats ?? 0} seats · ${Math.round((dd.ms ?? 0) / 1000)}s · ${d.id}`;
-          const line = `${pad}${theme.fg("dim", head)} ${theme.fg("dim", "— " + first)}`;
+          // the intention round is not deliberation: label it as such, or every turn reads as one
+          const label = dd.status === "concluded" ? "deliberation" : "intentions";
+          const head = `✓ ${label} · turn ${dd.turn ?? 1} · ${dd.seats ?? 0} seats · ${Math.round((dd.ms ?? 0) / 1000)}s · ${d.id}`;
+          // an off-the-record round shows its existence, not its words: the board is private, the line expands on demand
+          const preview = dd.status === "concluded" ? `/committee deliberation ${d.id}` : "— " + first;
+          const line = `${pad}${theme.fg("dim", head)} ${theme.fg("dim", preview)}`;
           return [truncateToWidth(line, width)];
         },
       };
@@ -857,7 +873,7 @@ export default function (pi: ExtensionAPI) {
   const ledger = () => speakers.map((s) => `${s.meta.id} ${s.stat.turns}x${s.stat.lastSpoke ? `@c${s.stat.lastSpoke}` : ""}`).join(", ") + `; floor: ${floorHolder ?? "nobody"}`;
   // factual spend so far, printed only when the ledger itself changes, so it costs nothing extra per call
   const spendLine = () => speakers.map((s) => `${s.meta.id}: ${s.stat.calls} calls, ${fmt(s.stat.fresh + s.stat.cached + s.stat.out)} billed tokens (re-reads included)${s.stat.cost ? `, $${s.stat.cost.toFixed(3)}` : ""}`).join(" · ");
-  const rules = `Floor rules (self-governed, nobody schedules turns): normally one speaker per cycle. Speak only when you add something the others' intentions do not cover. Defer to speakers who have spoken less. Whoever last held the floor may keep it to finish a thought. If several speak at once, fine; do not re-litigate, just be brief. Only what appears in the transcript was said; never cite an intention as if it were spoken. Contributions are at most 120 words unless your intention said length "long". If you ever have tools, keep their output short: ask for the smallest result that answers the question, since everything you bring back is read by the whole room.
+  const rules = `Floor rules (self-governed, nobody schedules turns): normally one speaker per cycle. Speak only when you add something the others' intentions do not cover. Defer to speakers who have spoken less. Whoever last held the floor may keep it to finish a thought. If several speak at once, fine; do not re-litigate, just be brief. Only what appears in the transcript was said. Intention-phase text is private scaffolding: never mention, cite or discuss it in a spoken reply — not "X plans to Y", not "X said the same" — unless the exchange phases themselves are the subject. Reference only numbered transcript events; anything else reads to the human as a fabrication. Write like an SMS: aim for one short burst, roughly 25 words, and never past 120 unless your intention said length "long". Ask or tell at most ONE most important remaining item per turn — one ask, one answer, one next step; park the rest for later turns. No recaps, no "I am about to do X" announcements: say the result. If you ever have tools, keep their output short: ask for the smallest result that answers the question, since everything you bring back is read by the whole room.
 When you refer to another seat, use its shorthand tag from the roster (for example @sp), not its full id; the transcript colors each tag in that seat\'s color. Humans use the same tags to address a seat. Never use gendered pronouns (he, she, his, her) for a seat or a person; use "they" or "it". When a message tags specific seats, the seats not tagged stay silent unless they have a pressing, urgent matter (a safety problem, a factual error that would mislead, a conflict about to happen); a tagged seat answers, and tags in another seat's reply do not count as addressing you.
 Speaking again is allowed: one turn is not a cap. Come back on new information only — a new human request, new evidence that changes your conclusion, or a consequential correction. Never to acknowledge, agree or restate what was said. Prefer saying it inside the round you are already in; a further round re-reads every seat's session, so it costs far more than your words do. Output tokens are cheap; calls are not.
 A human message never goes unanswered: if nobody has anything new to add, whoever answered the human most recently responds with action "repeat" and the event id of that earlier reply in ref, so it is shown again instead of silence.
@@ -886,6 +902,36 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     return `${head}${ledgerLine}${extra}Phase: ${phase}.`;
   };
 
+  /** how many off-the-record exchanges seats get before addressing the human. 0 disables the phase. */
+  const deliberationTurns = () => { const n = Number((cfg as any).deliberationTurns ?? 2); return Number.isFinite(n) ? Math.max(0, Math.min(3, Math.floor(n))) : 2; };
+  /** seats talk it out among themselves first: nothing here is published until one conclusion lands.
+   *  Returns the shared board, built from each seat's own reply, passed to the others in the next turn. */
+  const deliberate = async (seats: (typeof speakers)[number][], state: RoundState, tok: ReturnType<typeof roomGen.capture>) => {
+    const turns = deliberationTurns();
+    if (turns < 1 || seats.length < 2) return "";
+    const started = Date.now();
+    let board = "";
+    for (let t = 1; t <= turns; t++) {
+      for (const s of seats) setState(s.meta.id, "deliberating");
+      delibRound = state.n; delibStamp = cycleNo;
+      const said = await Promise.all(seats.map((s) => s.session.send(
+        packet(s, "deliberation", `Deliberation, turn ${t} of ${turns}. This is off the record: the human never sees it, so say it straight and do not address the human.${board ? `\nWhat the others said:\n${board}` : ""}\nOne short reply: your position, what you would concede, what the others must accept. Action "speak", your words in text.`),
+        responseSchema, budget(s)).then((r) => {
+          account(r, "deliberation");
+          const said = r.ok ? String((r.payload as any)?.text ?? "").trim().replace(/\s+/g, " ") : "";
+          if (said) { delibLive = `${s.meta.id}: ${said.length > 70 ? said.slice(0, 70) + "…" : said}`; refresh(); }
+          return r;
+        })));
+      if (!roomGen.accepts(tok)) return "";
+      board = said.filter((r) => r.ok && typeof (r.payload as any)?.text === "string" && (r.payload as any).text.trim())
+        .map((r) => `${r.speaker}: ${(r.payload as any).text.trim()}`).join("\n");
+    }
+    delibLive = "";
+    if (!board) return "";
+    publish({ author: "host", kind: "deliberation", text: board, data: { turn: state.n, seats: seats.length, ms: Date.now() - started, status: "concluded" } });
+    return board;
+  };
+
   // ---- one cycle: intentions (parallel) → everyone sees them → each holds or responds (parallel)
   const takeReply = (r: TurnResult) => {
     if (!r.ok) { diag(r, "respond"); setState(r.speaker, "err:respond"); publish({ author: r.speaker, kind: "error", text: `respond failed: ${r.error}` }); return 0; }
@@ -906,7 +952,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   let lastHumanId = "";
   let pendingReplies = 0;
   /** per-round bookkeeping, passed explicitly so overlapping rounds can't reset each other */
-  interface RoundState { n: number; spoke: number; focus?: Set<string>; wrapped?: boolean }
+  interface RoundState { n: number; spoke: number; focus?: Set<string>; wrapped?: boolean; phased?: boolean }
   /** appetite for another round: 1 at the start, halving every 4 rounds, never 0. A signal to seats, not a gate. */
   const appetite = (n: number) => Math.pow(2, -(n - 1) / 4);
   const WRAP_UP = 0.1;
@@ -915,8 +961,9 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   // the two phases decay at different rates: deciding who speaks is cheap and worth doing slowly,
   // one more round of speech is not. Each phase hears only its own number.
   const converge = (st: RoundState) => {
-    if (st.n < 2) return "";
-    return `Deliberation budget at round ${st.n}: ${Math.round(deliberation(st.n) * 100)}%. Deciding who speaks and what to do is cheaper than another round of speech, so it decays half as fast. Use it to agree on who does what before anyone replies.\n`;
+    const hold = `Holding is cheap: if you would wait or stay silent, return only {"preference":"wait"} (or "silent") and omit topic, intent and length. Write topic only when you intend to speak.\n`;
+    if (st.n < 2) return hold;
+    return hold + `Deliberation budget at round ${st.n}: ${Math.round(deliberation(st.n) * 100)}%. Deciding who speaks and what to do is cheaper than another round of speech, so it decays half as fast. Use it to agree on who does what before anyone replies.\n`;
   };
   const appetiteLine = (st: RoundState) => {
     if (st.n < 2) return "";
@@ -933,6 +980,11 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   async function round(ctx: ExtensionContext, state: RoundState, only?: (typeof speakers)[number]): Promise<number> {
     const free = only ? (only.inflight ? [] : [only]) : freeSeats().filter((s) => !state.focus || state.focus.has(s.meta.id));
     if (!free.length) return 0;
+    // one delimiter per speaking episode: everything the room says about this human message sits under it
+    if (!only && !state.phased) {
+      state.phased = true;
+      publish({ author: "host", kind: "phase", text: `committee · ${speakers.length} seats`, data: { seats: speakers.length, after: lastHumanId } });
+    }
     cycleNo++;
     // captured once for this invocation: a concurrent catch-up round must not steal the stamp
     const stamp = cycleNo;
@@ -964,11 +1016,11 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     const intentionLine = (p: any) => {
       const kind = [p?.preference, p?.intent].filter(Boolean).join("/");
       const topic = String(p?.topic ?? "").slice(0, 160);
-      return `${kind}: ${topic}${p?.tool ? ` ⚙ ${p.tool}` : ""}`;
+      return `${kind}${topic ? `: ${topic}` : ""}${p?.tool ? ` ⚙ ${p.tool}` : ""}`;
     };
     const summary = intents.map((r) => !r.ok ? `${r.speaker}: ERROR ${r.error}` : (r as any).skipped ? `${r.speaker}: (not polled, nothing new)` : `${r.speaker}: ${intentionLine(r.payload)}`).join("\n");
     if (!only) {
-      publish({ author: "host", kind: "deliberation", text: summary, data: { turn: state.n, seats: free.length, ms: Date.now() - roundStart } });
+      latestIntentionsId = publish({ author: "host", kind: "deliberation", text: summary, data: { turn: state.n, seats: free.length, ms: Date.now() - roundStart, status: "intentions" } }).id;
       for (const r of intents) if (!r.ok) { diag(r, "intention"); publish({ author: r.speaker, kind: "error", text: `intention failed: ${r.error}` }); }
     }
     saveSessions();
@@ -983,13 +1035,23 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (wrap) state.wrapped = true;
     const speakers_ = wrap ? candidates.slice(-1) : candidates;
     for (const s of candidates) if (!speakers_.includes(s)) setState(s.meta.id, "listening");
-    const alone = speakers_.length === 1;
+    let alone = speakers_.length === 1;
+    // two or more seats wanted the floor: let them settle it between themselves first, one conclusion on screen
+    const concluded = alone || wrap || only ? "" : await deliberate(speakers_, state, roundTok);
+    if (!roomGen.accepts(roundTok)) return 0;
+    // one conclusion, one voice: after deliberating, the seat that has spoken least presents for the room
+    if (concluded && speakers_.length > 1) {
+      const presenter = speakers_.slice().sort((a, b) => a.stat.turns - b.stat.turns)[0];
+      for (const s of speakers_) if (s !== presenter) setState(s.meta.id, "listening");
+      speakers_.length = 0; speakers_.push(presenter); alone = true;
+    }
     for (const s of speakers_) {
       if (wrap) { dispatch(ctx, s, `Appetite for more turns is below 10%. Say in one short reply why the room could not settle who speaks or what to decide, then stop. The human or another seat can carry on from there. Action "speak".`, asHuman, state); continue; }
       const extra = alone
         ? `Nobody else wants to speak this cycle; you have the floor.${s.meta.tools ? " Use your tools now if your intention needed a lookup." : ""} Put the contribution in text with action "speak".\n`
         : `Everyone's intentions:\n${summary}\nHold (action wait or silent, empty text) or respond now (action speak, contribution in text).${s.meta.tools ? " If you respond and your intention needed a lookup, use your tools first." : ""}\n`;
-      dispatch(ctx, s, extra, asHuman, state);
+      const open = concluded ? `You settled this with the other seats off the record. Their last words:\n${concluded}\nAnswer the human once, as a conclusion, and do not repeat what they said in slightly different words.\n` : "";
+      dispatch(ctx, s, open + extra, asHuman, state);
     }
     return speakers_.length;
   }

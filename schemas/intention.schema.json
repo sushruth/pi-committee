@@ -24,7 +24,8 @@
     },
     "topic": {
       "type": "string",
-      "maxLength": 160
+      "maxLength": 160,
+      "description": "one sentence on what you would add; required only when preference is speak, omit it to hold cheaply"
     },
     "length": {
       "type": "string",
@@ -40,8 +41,7 @@
     }
   },
   "required": [
-    "preference",
-    "topic"
+    "preference"
   ],
   "additionalProperties": true,
   "examples": [

@@ -29,7 +29,7 @@ Then run `pi` in any folder and type `/committee on` (or start with `pi --commit
 ## Commands
 
 - `/committee on | off | pause | resume | fresh | reset`: `fresh` starts a new chat with the same seats; `reset` deletes the room
-- `/committee deliberation [id]`: expand a collapsed deliberation round
+- `/committee deliberation [id]`: expand a collapsed round (the per-turn intentions line; "deliberation" language predates the rename)
 - `/committee brief <text or file>`: what every seat should know about this folder
 - `/resume-committee`: pick an earlier conversation in this folder and continue it, seats and all
 - `/seats`: add, change or remove seats
