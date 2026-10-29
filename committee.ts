@@ -1,3 +1,4 @@
+import { titleFrom, roomLabel } from "./title.ts";
 import { focusFromText, focusFromQueue } from "./routing.ts";
 import { reportedCost } from "./accounting.ts";
 // pi extension: the host for a committee conversation.
@@ -661,8 +662,19 @@ export default function (pi: ExtensionAPI) {
     if (busy) return ctx.ui.notify("wait for the committee to settle first", "warning");
     const rooms = roomsList();
     if (!rooms.length) return ctx.ui.notify("no archived rooms in this folder yet", "info");
-    const pick = await ctx.ui.select("Resume an archived committee room", [...rooms, "cancel"]);
-    if (!pick || pick === "cancel") return;
+    const labels = new Map<string, string>();
+    for (const id of rooms) {
+      let title = "new room", msgs = 0;
+      try {
+        const evs = readFileSync(join(roomsDir, id, "events.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+        msgs = evs.filter((e) => e.kind === "human" || e.kind === "speak").length;
+        const h = evs.find((e) => e.kind === "human"); if (h) title = titleFrom(h.text);
+      } catch {}
+      labels.set(roomLabel(id, title, msgs), id);
+    }
+    const choice = await ctx.ui.select("Resume an archived committee room", [...labels.keys(), "cancel"]);
+    const pick = choice ? labels.get(choice) : undefined;
+    if (!pick) return;
     switchRoom(pick); await enableMode(ctx);
     ctx.ui.notify(`resumed room ${pick}`, "info");
   };
@@ -974,6 +986,10 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (!active || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
     cycleNo++;
     publish({ author: "you", kind: "human", text: event.text });
+    // name the pi session after the first human message, once per room, unless the user already named it
+    if (!events.some((e) => e !== events[events.length - 1] && e.kind === "human")) {
+      try { const cur = pi.getSessionName(); if (!cur || cur.startsWith("⚒ ")) pi.setSessionName(`⚒ ${titleFrom(event.text)}`); } catch {}
+    }
     lastHumanId = events[events.length - 1]?.id ?? "";
     lastHumanText = event.text;
     if (paused) { heldWhilePaused = true; pausedTexts.push(event.text); ctx.ui.notify("paused: logged, nobody answers until /committee resume", "warning"); return { action: "handled" }; }
