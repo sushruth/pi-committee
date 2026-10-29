@@ -911,6 +911,12 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (turns < 1 || seats.length < 2) return "";
     const started = Date.now();
     let board = "";
+    // these seats are busy for the whole phase: without this a concurrent round could poll the same
+    // session while the hidden exchange is still writing to it, interleaving two conversations
+    const held = seats.filter((s) => !s.inflight);
+    for (const s of held) s.inflight = true;
+    syncBusy();
+    try {
     for (let t = 1; t <= turns; t++) {
       for (const s of seats) setState(s.meta.id, "deliberating");
       delibRound = state.n; delibStamp = cycleNo;
@@ -930,6 +936,12 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     if (!board) return "";
     publish({ author: "host", kind: "deliberation", text: board, data: { turn: state.n, seats: seats.length, ms: Date.now() - started, status: "concluded" } });
     return board;
+    } finally {
+      // release in every path: a thrown or superseded exchange must not strand a seat as busy forever
+      delibLive = "";
+      for (const s of held) s.inflight = false;
+      syncBusy();
+    }
   };
 
   // ---- one cycle: intentions (parallel) → everyone sees them → each holds or responds (parallel)
