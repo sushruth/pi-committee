@@ -33,7 +33,7 @@ interface Config {
   /** what every seat should know about this folder: text, or a path to a file (relative to the room, or ~) */
   brief?: string;
   timeoutSeconds?: number;
-  /** autonomous rounds per human message before the room stops on its own: a runaway guard, not the normal stop (default 8) */
+  /** autonomous rounds per human message before the room stops on its own: a runaway guard, not the normal stop (unset: no limit) */
   /** poll only seats the human message tags (@all asks everyone); off by default */
   tagRouting?: boolean;
   maxRounds?: number;
@@ -849,15 +849,16 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   // it missed as one delta batch when it returns.
   let lastHumanId = "";
   let pendingReplies = 0;
-  const cap = () => Math.max(1, cfg.maxRounds ?? 8);
+  /** no ceiling unless the setup asks for one: a quiet round is what ends a conversation */
+  const cap = () => (cfg.maxRounds && cfg.maxRounds > 0 ? cfg.maxRounds : Infinity);
   /** per-round bookkeeping, passed explicitly so overlapping rounds can't reset each other */
-  interface RoundState { left: number; spoke: number; focus?: Set<string> }
+  interface RoundState { n: number; spoke: number; focus?: Set<string> }
   /** from the third round on, ask seats to converge: speak only if the answer changes or a direct question is open */
   const converge = (st: RoundState) => {
-    const round = cap() - st.left;
+    const round = st.n;
     return round >= 3 ? `This is round ${round} on the same human request. Speak only if you change the answer, correct a fact, or a direct question to you is still open. Otherwise hold; agreement and restating are not needed.\n` : "";
   };
-  const newState = (focus?: Set<string>): RoundState => ({ left: cap() - 1, spoke: 0, focus });
+  const newState = (focus?: Set<string>): RoundState => ({ n: 1, spoke: 0, focus });
   /** opt-in (cfg.tagRouting): a human message that tags seats is polled only on those seats; @all/@everyone/@others or no tag asks everyone */
   const seatTags = () => speakers.map((q) => ({ id: q.meta.id, tag: tagOf(q.meta.id) }));
   const focusOf = (text: string) => (cfg.tagRouting ? focusFromText(text, seatTags()) : undefined);
@@ -981,8 +982,11 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
       const focus = focusOfQueue(); queued.splice(0); drawQueue(ctx); const fresh = newState(focus); void round(ctx, fresh); return;
     }
     if (state.spoke === 0 && forceAnswer(ctx, state)) return;
-    if (state.spoke > 0 && state.left > 0) { state.left--; void round(ctx, state); }
-    else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds (safety limit); type again to continue`, "info"); }
+    if (state.spoke > 0 && state.n < cap()) {
+      state.n++;
+      if (state.n === 9) ctx.ui.notify(`round 9 on this request, $${speakers.reduce((a, s) => a + s.stat.cost, 0).toFixed(2)} spent in the room so far; still going, /committee pause to stop`, "info");
+      void round(ctx, state);
+    } else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds (maxRounds in committee.json); type again to continue`, "info"); }
   };
 
   pi.on("input", async (event, ctx) => {
