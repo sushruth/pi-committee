@@ -901,8 +901,10 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     const free = only ? (only.inflight ? [] : [only]) : freeSeats().filter((s) => !state.focus || state.focus.has(s.meta.id));
     if (!free.length) return 0;
     cycleNo++;
+    // captured once for this invocation: a concurrent catch-up round must not steal the stamp
+    const stamp = cycleNo;
     delibRound = state.n;
-    delibStamp = cycleNo;
+    delibStamp = stamp;
     if (!only) state.spoke = 0;
     for (const s of free) setState(s.meta.id, "thinking");
     // a seat that has seen no new public event since its last poll has nothing to decide; skip the call
@@ -919,7 +921,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         .then((r) => {
           if (r.ok) { s.polledAt = seen; s.sent = s.pendingSent ?? s.sent; }
           s.inflight = false; syncBusy();
-          account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) { st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; st.intentStamp = cycleNo; } setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r;
+          account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) { st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; st.intentStamp = stamp; } setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r;
         });
     }));
     if (!roomGen.accepts(roundTok)) return 0; // the room changed while seats were thinking
