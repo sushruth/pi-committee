@@ -83,6 +83,7 @@ export class Speaker {
   private lastCtx?: number;
   private claudeCost = new CumulativeCost();
   private nudged = false;
+  private recoveryUsage?: Usage;
   private codexTotal?: any;
   private codexBase?: any;
   private act(text: string | null) { this.opts.onActivity?.(text); }
@@ -254,15 +255,25 @@ export class Speaker {
 
   // ---------- common
   private settleJson(text: string, raw: unknown, usage?: Usage) {
+    if (this.recoveryUsage) {
+      const prior = this.recoveryUsage;
+      usage = { ...usage, fresh: prior.fresh + (usage?.fresh ?? 0), cached: prior.cached + (usage?.cached ?? 0), out: prior.out + (usage?.out ?? 0),
+        ...(prior.cost !== undefined || usage?.cost !== undefined ? { cost: (prior.cost ?? 0) + (usage?.cost ?? 0) } : {}) };
+      this.recoveryUsage = undefined;
+    }
     const payload = parseJson(text);
-    // models that just used tools often answer in prose; ask once for the same content as JSON
-    if (payload === undefined && !this.nudged) {
+    const objectReply = payload !== null && typeof payload === "object" && !Array.isArray(payload);
+    // Recovery must have enforced tool prohibition, not an advisory prompt.
+    if (!objectReply && !this.nudged && (this.opts.cli === "pi" || this.opts.cli === "opencode")) {
       if (this.opts.cli === "pi") this.resumed = true;
       this.nudged = true;
-      this.dispatch("Your previous reply was prose, not JSON, so the room did not see it. Send the same content again as the JSON object the host asked for (put the prose in the text field).");
+      this.noTools = true;
+      this.recoveryUsage = usage;
+      const ex = (this.schema as any).examples?.[0];
+      this.dispatch("Your previous reply was not a JSON object, so the room did not see it. Reformat the same answer only; do not repeat any actions. Reply with JSON only.\n" + JSON.stringify(ex ?? this.schema));
       return;
     }
-    if (payload === undefined) return this.settle({ speaker: this.id, ok: false, error: `non-JSON reply: ${text.slice(0, 200)}`, usage, raw });
+    if (!objectReply) return this.settle({ speaker: this.id, ok: false, error: `non-JSON reply: ${text.slice(0, 200)}`, usage, raw });
     coerce(payload as Record<string, unknown>, this.schema);
     const missing = ((this.schema as any).required ?? []).filter((k: string) => !(k in (payload as any)));
     if (missing.length) return this.settle({ speaker: this.id, ok: false, error: `reply missing ${missing.join(",")}: ${text.slice(0, 200)}`, usage, raw });
@@ -287,7 +298,7 @@ export class Speaker {
     const noToolsLine = this.noTools && (this.opts.cli === "claude" || this.opts.cli === "codex") ? "\nNo tools in this phase; just answer." : "";
     const prompt = ex ? `${text}${noToolsLine}\n\nReply with only one JSON object shaped like this, no prose:\n${JSON.stringify(ex)}`
       : `${text}\n\nReply with only JSON matching this schema, no prose:\n${JSON.stringify(schema)}`;
-    this.nudged = false; this.work = { calls: 0, chars: 0 };
+    this.nudged = false; this.recoveryUsage = undefined; this.work = { calls: 0, chars: 0 };
     return new Promise((resolve) => {
       const t = setTimeout(() => { this.oneShot?.kill(); this.settle({ speaker: this.id, ok: false, error: `timeout ${timeoutMs}ms` }); }, timeoutMs);
       this.pending = (r) => { clearTimeout(t); resolve(r); };

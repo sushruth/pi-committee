@@ -814,7 +814,8 @@ export default function (pi: ExtensionAPI) {
         render(width: number) {
           const dd = (d.data ?? {}) as { seats?: number };
           const label = `── committee speaks · ${dd.seats ?? 0} seats · ${d.id} `;
-          return [truncateToWidth(theme.fg("dim", label.padEnd(width - outputPad, "─")), width)];
+          const pad = " ".repeat(outputPad); // same left edge as every other row
+          return [truncateToWidth(pad + theme.fg("dim", label.padEnd(Math.max(0, width - outputPad), "─")), width)];
         },
       };
     }
