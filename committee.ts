@@ -44,7 +44,7 @@ interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona
 interface Ghost { id: string; cli: Cli; model: string; thinking?: string; left: string }
 type Kind = "human" | "speak" | "error" | "intention" | "usage" | "tool";
 interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown }
-interface Stat { state: string; since: number; activity?: string; ctx?: number; window?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; lastReply?: string }
+interface Stat { state: string; since: number; activity?: string; ctx?: number; window?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; intentRound?: number; lastReply?: string }
 interface Saved { cli: Cli; model: string; thinking?: string; tools?: Tools; session_id?: string; sent: number; rules?: string }
 const PUBLIC: Kind[] = ["human", "speak", "error"]; // "tool" events from older logs are history only
 
@@ -347,7 +347,9 @@ export default function (pi: ExtensionAPI) {
     const lines = [`${frame} ${ansi(244, `deliberating · turn ${delibRound} · ${deciding.length} deciding · ${elapsed(age)}`)}`];
     for (const s of speakers) {
       const c = colorOf(s.meta.id);
-      const what = s.stat.state === "thinking" ? ansi(244, "deciding…") : s.stat.lastIntent ? ansi(244, s.stat.lastIntent) : "";
+      // only this round's intention: lastIntent survives from earlier rounds and would read as stale
+      const fresh = s.stat.intentRound === delibRound;
+      const what = s.stat.state === "thinking" ? ansi(244, "deciding…") : fresh && s.stat.lastIntent ? ansi(244, s.stat.lastIntent) : "";
       if (!what) continue;
       lines.push(`  ${ansi(c, s.meta.id)} ${what}`);
     }
@@ -915,7 +917,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
         .then((r) => {
           if (r.ok) { s.polledAt = seen; s.sent = s.pendingSent ?? s.sent; }
           s.inflight = false; syncBusy();
-          account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r;
+          account(r, "intention"); const p = r.payload as any; const st = byId(r.speaker)?.stat; if (st && r.ok) { st.lastIntent = `${p.preference}/${p.intent ?? "contribute"}: ${p.topic}${p.tool ? " ⚙ " + p.tool : ""}`; st.intentRound = state.n; } setState(r.speaker, r.ok ? `${p.preference}/${p.intent ?? "contribute"}` : "err:intention"); return r;
         });
     }));
     if (!roomGen.accepts(roundTok)) return 0; // the room changed while seats were thinking
