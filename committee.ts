@@ -394,7 +394,7 @@ export default function (pi: ExtensionAPI) {
   const elapsed = (ms: number) => { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`; };
   // the clock in the seat cells ticks while anyone is busy
   let ticker: ReturnType<typeof setInterval> | undefined;
-  const tick = () => { const anyBusy = speakers.some((s) => BUSY.has(s.stat.state)); if (anyBusy && !ticker) ticker = setInterval(() => { drawDeliberating(); widgetTui?.requestRender(); }, 1000); if (!anyBusy && ticker) { clearInterval(ticker); ticker = undefined; } };
+  const tick = () => { const anyBusy = speakers.some((s) => BUSY.has(s.stat.state)); if (anyBusy && !ticker) ticker = setInterval(() => widgetTui?.requestRender(), 1000); if (!anyBusy && ticker) { clearInterval(ticker); ticker = undefined; } };
 
   // ---- a folder that already has a committee gets one clickable line above the editor
   // instead of a toast you can miss. ✕ remembers "not now" in committee/ui.json (gitignored with
