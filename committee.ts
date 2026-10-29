@@ -327,7 +327,34 @@ export default function (pi: ExtensionAPI) {
       },
     };
   };
+  // A live view of the round before anything is published. Intentions are never logged, so this
+  // reads seat state only: who is still deciding, and what the others propose. It disappears when
+  // the round ends, which is why it needs no history.
+  const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let delibTicker: ReturnType<typeof setInterval> | undefined;
+  const drawDeliberating = () => {
+    if (!ui) return;
+    const deciding = speakers.filter((s) => s.stat.state === "thinking");
+    if (!deciding.length) {
+      if (delibTicker) { clearInterval(delibTicker); delibTicker = undefined; }
+      return ui.setWidget("committee-deliberating", undefined);
+    }
+    // its own clock: the block animates while seats decide, independently of the table widget
+    if (!delibTicker) delibTicker = setInterval(() => drawDeliberating(), 1000);
+    const now = Date.now();
+    const age = Math.max(...deciding.map((s) => now - s.stat.since));
+    const frame = SPIN[Math.floor(now / 120) % SPIN.length];
+    const lines = [`${frame} ${ansi(244, `deliberating · ${deciding.length} deciding · ${elapsed(age)}`)}`];
+    for (const s of speakers) {
+      const c = colorOf(s.meta.id);
+      const what = s.stat.state === "thinking" ? ansi(244, "deciding…") : s.stat.lastIntent ? ansi(244, s.stat.lastIntent) : "";
+      if (!what) continue;
+      lines.push(`  ${ansi(c, s.meta.id)} ${what}`);
+    }
+    ui.setWidget("committee-deliberating", lines, { placement: "aboveEditor" });
+  };
   const refresh = () => {
+    drawDeliberating();
     if (!showTable) { if (widgetTui) widgetTui.requestRender(); else ui?.setWidget("committee", widgetFactory as any); return; }
     const idW = Math.max(...speakers.map((s) => s.meta.id.length)) + 2;
     const short = (s: (typeof speakers)[number]) => `${s.meta.cli}:${s.meta.model.split("/").pop()}`;
@@ -365,7 +392,7 @@ export default function (pi: ExtensionAPI) {
   const elapsed = (ms: number) => { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`; };
   // the clock in the seat cells ticks while anyone is busy
   let ticker: ReturnType<typeof setInterval> | undefined;
-  const tick = () => { const anyBusy = speakers.some((s) => BUSY.has(s.stat.state)); if (anyBusy && !ticker) ticker = setInterval(() => widgetTui?.requestRender(), 1000); if (!anyBusy && ticker) { clearInterval(ticker); ticker = undefined; } };
+  const tick = () => { const anyBusy = speakers.some((s) => BUSY.has(s.stat.state)); if (anyBusy && !ticker) ticker = setInterval(() => { drawDeliberating(); widgetTui?.requestRender(); }, 1000); if (!anyBusy && ticker) { clearInterval(ticker); ticker = undefined; } };
 
   // ---- a folder that already has a committee gets one clickable line above the editor
   // instead of a toast you can miss. ✕ remembers "not now" in committee/ui.json (gitignored with
@@ -1022,5 +1049,5 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     await round(ctx, newState(focus));
   }
 
-  pi.on("session_shutdown", async () => { if (ticker) clearInterval(ticker); saveSessions(); for (const s of speakers) s.session.close(); });
+  pi.on("session_shutdown", async () => { if (ticker) clearInterval(ticker); if (delibTicker) clearInterval(delibTicker); saveSessions(); for (const s of speakers) s.session.close(); });
 }
