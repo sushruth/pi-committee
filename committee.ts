@@ -36,7 +36,6 @@ interface Config {
   /** autonomous rounds per human message before the room stops on its own: a runaway guard, not the normal stop (unset: no limit) */
   /** poll only seats the human message tags (@all asks everyone); off by default */
   tagRouting?: boolean;
-  maxRounds?: number;
   /** per call, for seats with tools (default 600) */
   toolTimeoutSeconds?: number;
 }
@@ -849,8 +848,6 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   // it missed as one delta batch when it returns.
   let lastHumanId = "";
   let pendingReplies = 0;
-  /** no ceiling unless the setup asks for one: a quiet round is what ends a conversation */
-  const cap = () => (cfg.maxRounds && cfg.maxRounds > 0 ? cfg.maxRounds : Infinity);
   /** per-round bookkeeping, passed explicitly so overlapping rounds can't reset each other */
   interface RoundState { n: number; spoke: number; focus?: Set<string> }
   /** appetite for another round: 1 at the start, halving every 4 rounds, never 0. A signal to seats, not a gate. */
@@ -991,11 +988,10 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     }
     if (state.spoke === 0 && forceAnswer(ctx, state)) return;
     if (state.spoke > 0 && appetite(state.n) < WRAP_UP) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify("the room has said why it could not settle; your turn, or ask any seat to carry on", "info"); return; }
-    if (state.spoke > 0 && state.n < cap()) {
+    if (state.spoke > 0) {
       state.n++;
-      if (state.n === 9) ctx.ui.notify(`round 9 on this request, $${speakers.reduce((a, s) => a + s.stat.cost, 0).toFixed(2)} spent in the room so far; still going, /committee pause to stop`, "info");
       void round(ctx, state);
-    } else if (state.spoke > 0) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify(`stopped after ${cap()} rounds (maxRounds in committee.json); type again to continue`, "info"); }
+    }
   };
 
   pi.on("input", async (event, ctx) => {
