@@ -849,7 +849,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   let lastHumanId = "";
   let pendingReplies = 0;
   /** per-round bookkeeping, passed explicitly so overlapping rounds can't reset each other */
-  interface RoundState { n: number; spoke: number; focus?: Set<string> }
+  interface RoundState { n: number; spoke: number; focus?: Set<string>; wrapped?: boolean }
   /** appetite for another round: 1 at the start, halving every 4 rounds, never 0. A signal to seats, not a gate. */
   const appetite = (n: number) => Math.pow(2, -(n - 1) / 4);
   const WRAP_UP = 0.1;
@@ -910,7 +910,8 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
 
     const asHuman = lastHumanId;
     // appetite is nearly gone: the last seat in the list that wanted to speak says why the room could not pick, and the rest hold
-    const wrap = appetite(state.n) < WRAP_UP;
+    const wrap = appetite(state.n) < WRAP_UP && !state.wrapped;
+    if (wrap) state.wrapped = true;
     const speakers_ = wrap ? candidates.slice(-1) : candidates;
     for (const s of candidates) if (!speakers_.includes(s)) setState(s.meta.id, "listening");
     const alone = speakers_.length === 1;
@@ -987,7 +988,6 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
       const focus = focusOfQueue(); queued.splice(0); drawQueue(ctx); const fresh = newState(focus); void round(ctx, fresh); return;
     }
     if (state.spoke === 0 && forceAnswer(ctx, state)) return;
-    if (state.spoke > 0 && appetite(state.n) < WRAP_UP) { ctx.ui.setStatus("committee", "idle"); ctx.ui.notify("the room has said why it could not settle; your turn, or ask any seat to carry on", "info"); return; }
     if (state.spoke > 0) {
       state.n++;
       void round(ctx, state);
