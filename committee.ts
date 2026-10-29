@@ -900,11 +900,15 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
   const WRAP_UP = 0.1;
   /** deliberation decays at half the rate of speaking: arguing longer is fine, so 2^(-n/8) */
   const deliberation = (n: number) => Math.pow(2, -n / 8);
+  // the two phases decay at different rates: deciding who speaks is cheap and worth doing slowly,
+  // one more round of speech is not. Each phase hears only its own number.
   const converge = (st: RoundState) => {
-    const a = appetite(st.n), dl = deliberation(st.n);
     if (st.n < 2) return "";
-    return `Appetite for more turns on this request: ${Math.round(a * 100)}% (round ${st.n}). The lower it is, the more the room should pick and decide soon. It is a signal, not a rule.\n`
-      + `Deliberation budget at round ${st.n}: ${Math.round(dl * 100)}%. Arguing is cheaper than another round of speech, so this decays half as fast. Use it to agree on who does what before anyone replies.\n`;
+    return `Deliberation budget at round ${st.n}: ${Math.round(deliberation(st.n) * 100)}%. Deciding who speaks and what to do is cheaper than another round of speech, so it decays half as fast. Use it to agree on who does what before anyone replies.\n`;
+  };
+  const appetiteLine = (st: RoundState) => {
+    if (st.n < 2) return "";
+    return `Appetite for more turns on this request: ${Math.round(appetite(st.n) * 100)}% (round ${st.n}). The lower it is, the more the room should pick and decide soon. It is a signal, not a rule.\n`;
   };
   const newState = (focus?: Set<string>): RoundState => ({ n: 1, spoke: 0, focus });
   /** opt-in (cfg.tagRouting): a human message that tags seats is polled only on those seats; @all/@everyone/@others or no tag asks everyone */
@@ -983,7 +987,7 @@ Two phases, always as JSON: "intention" (do you have something to add; topic is 
     const tok = roomGen.capture();
     s.inflight = true; pendingReplies++; syncBusy();
     setState(s.meta.id, s.meta.tools ? "working" : "replying");
-    void s.session.send(packet(s, "respond", extra), responseSchema, budget(s))
+    void s.session.send(packet(s, "respond", extra + appetiteLine(state)), responseSchema, budget(s))
       .then((r) => {
         if (!roomGen.accepts(tok)) return;
         account(r, "respond");
