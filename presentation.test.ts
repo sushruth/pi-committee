@@ -10,7 +10,7 @@ import { join } from "node:path";
 function theme(appearance: "light" | "dark") {
   const light = appearance === "light";
   return new Theme(
-    { text: light ? "#151515" : "#eeeeee", dim: "#888888", muted: "#888888", thinkingXhigh: "#888888" } as any,
+    { text: light ? "#151515" : "#eeeeee", dim: "#888888", muted: "#888888", thinkingXhigh: "#888888", customMessageLabel: "#aa88cc" } as any,
     { userMessageBg: light ? "#ffffff" : "#151515", customMessageBg: light ? "#f5f5f5" : "#222222", selectedBg: "#888888" } as any,
     "truecolor", { appearance },
   );
@@ -77,6 +77,8 @@ for (const appearance of ["light", "dark"] as const) {
       const lines = recapBox(theme(appearance), "Decision: keep the existing reporter.\nUnresolved: 界界界界界界", width, "recap when you sent this");
       expect(lines.length).toBeGreaterThan(2);
       expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+      expect(lines.join("\n")).not.toContain("\x1b[48;");
+      expect(lines[0]).toContain("\x1b[38;2;170;136;204m");
     }
   });
 }

@@ -14,9 +14,10 @@ export function recapBox(theme: Theme, text: string, width: number, heading: str
   const w = Math.max(1, width);
   const inner = Math.max(1, w - 4);
   const lines = wrapTextWithAnsi(text, inner);
+  const border = (value: string) => theme.fg("customMessageLabel", value);
   return [
-    theme.fg("dim", truncateToWidth(`╭─ ${heading} ` + "─".repeat(w), w, "")),
-    ...lines.map((line) => theme.bg("customMessageBg", truncateToWidth(`│ ${theme.fg("text", line + " ".repeat(Math.max(0, inner - visibleWidth(line))))} │`, w, ""))),
-    theme.fg("dim", truncateToWidth("╰" + "─".repeat(Math.max(0, w - 2)) + "╯", w, "")),
+    border(truncateToWidth(`╭─ ${heading} ` + "─".repeat(w), Math.max(0, w - 1), "")) + border("╮"),
+    ...lines.map((line) => truncateToWidth(`${border("│")} ${theme.fg("text", line + " ".repeat(Math.max(0, inner - visibleWidth(line))))} ${border("│")}`, w, "")),
+    border(truncateToWidth("╰" + "─".repeat(Math.max(0, w - 2)) + "╯", w, "")),
   ];
 }
