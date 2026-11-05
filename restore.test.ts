@@ -21,11 +21,11 @@ test("restore displays conversation and recap once, excluding usage and coordina
   `));
   const h = make();
   await h.show();
-  expect(h.displayed.map((e: any) => e.kind)).toEqual(["speak", "phase", "deliberation", "recap"]);
+  expect(h.displayed.map((e: any) => e.kind)).toEqual(["speak", "deliberation", "recap"]);
   await h.show();
   h.reload();
   await h.show();
-  expect(h.displayed).toHaveLength(4);
+  expect(h.displayed).toHaveLength(3);
 });
 
 test("restoring a different room does not confuse reused event ids", async () => {

@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { Speaker, codexModels, modelWindow, opencodeVariants, type Cli, type Tools, type TurnResult } from "./speaker.ts";
+import { Speaker, codexModels, modelWindow, opencodeVariants, type Cli, type Tools, type ToolWork, type TurnResult } from "./speaker.ts";
 import { planRoomStart, roomBinding, RoomGeneration } from "./lifecycle.ts";
 import intentionSchema from "./schemas/intention.schema.json";
 import responseSchema from "./schemas/response.schema.json";
@@ -218,7 +218,7 @@ export default function (pi: ExtensionAPI) {
     appendFileSync(logPath, JSON.stringify({ ts: Date.now(), ...ev }) + "\n");
     // PUBLIC decides what reaches a seat's delta; display is a separate question. A deliberation
     // round is shown to the human and never sent to seats, so it gets its own display path.
-    if (PUBLIC.includes(ev.kind) || ev.kind === "deliberation" || ev.kind === "phase" || ev.kind === "recap") displayEvent(ev);
+    if (PUBLIC.includes(ev.kind) || ev.kind === "deliberation" || ev.kind === "recap") displayEvent(ev);
     if (ev.kind === "human") mirror(ev.text);
     return ev;
   };
@@ -322,6 +322,9 @@ export default function (pi: ExtensionAPI) {
       ? [...row("state", `${glyph(s.stat.state)} ${s.stat.state}${BUSY.has(s.stat.state) ? " " + elapsed(Date.now() - s.stat.since) : ""}`), ...(s.stat.activity ? row("now", `⚙ ${s.stat.activity}`) : []), ...row("intention", s.stat.lastIntent ?? "(none yet)"), ...row("reply", s.stat.lastReply ?? "(none yet)")]
       : [...row("state", `◌ gone, left after ${g!.left}`), ...row("was", seatMeta(g!))];
     const m = s?.meta ?? g!;
+    const lastWork = ([...events].reverse().find((e) => e.author === m.id && e.kind === "speak")?.data as { tools?: ToolWork } | undefined)?.tools;
+    if (s) body.push(...row("tools", s.meta.tools === "all" ? "full access" : s.meta.tools === "read" ? "read-only" : "none"));
+    if (lastWork) body.push(...row("last work", `${lastWork.calls} tool calls · ${fmt(lastWork.chars)} output chars`));
     return frame(` ${m.id} · ${m.cli}:${m.model} ${m.thinking ? "#" + m.thinking + " " : ""}`, body);
   };
   const widgetFactory = (tui: { requestRender(): void }) => {
@@ -474,7 +477,7 @@ export default function (pi: ExtensionAPI) {
     const entries = ctx.sessionManager.getBranch();
     const displayed = entries.filter((e) => e.type === "custom_message" && e.customType === "committee" && e.display).map((e) => (e as { details?: Event }).details);
     for (const ev of events) {
-      if (!(PUBLIC.includes(ev.kind) || ev.kind === "deliberation" || ev.kind === "phase" || ev.kind === "recap")) continue;
+      if (!(PUBLIC.includes(ev.kind) || ev.kind === "deliberation" || ev.kind === "recap")) continue;
       if (displayed.some((d) => d?.id === ev.id && (d.roomId ? d.roomId === roomId : d.kind === ev.kind && d.author === ev.author && d.text === ev.text))) continue;
       displayEvent(ev);
     }
@@ -837,18 +840,7 @@ export default function (pi: ExtensionAPI) {
     const d = message.details as Event;
     const content = String(message.content);
     const color = d.kind === "human" ? 250 : d.kind === "error" ? 196 : d.kind === "tool" ? 244 : colorOf(d.author);
-    if (d.kind === "phase") {
-      // one rule per speaking episode, not one per turn: the turns are detail, the episode is the unit
-      return {
-        invalidate() {},
-        render(width: number) {
-          const dd = (d.data ?? {}) as { seats?: number };
-          const label = `── committee speaks · ${dd.seats ?? 0} seats · ${d.id} `;
-          const pad = " ".repeat(outputPad); // same left edge as every other row
-          return [truncateToWidth(pad + theme.fg("dim", label.padEnd(Math.max(0, width - outputPad), "─")), width)];
-        },
-      };
-    }
+    if (d.kind === "phase") return { invalidate() {}, render: () => [] };
     if (d.kind === "deliberation") {
       // one line per round, not a block: the detail stays in the file, the room sees a summary.
       // Intention rounds are status, not conversation: they stay in the log and never take a row.
@@ -865,14 +857,13 @@ export default function (pi: ExtensionAPI) {
         render(width: number) {
           const current = (!d.roomId || d.roomId === roomId ? events.find((e) => e.id === d.id) : undefined) ?? d;
           const dd = (current.data ?? {}) as { turn?: number; seats?: number; ms?: number; started?: number; status?: string };
-          const pad = " ".repeat(outputPad);
+          const pad = " ".repeat(Math.min(outputPad + 1, Math.max(0, width - 1)));
           const open = expanded || expandedDeliberations.has(d.id);
           const ms = dd.status === "running" && dd.started ? Date.now() - dd.started : dd.ms ?? 0;
           const status = dd.status === "running" ? "discussing" : dd.status === "paused" ? "paused" : "finished";
-          const head = `${open ? "▾" : "▸"} deliberation · ${status} · ${dd.seats ?? 0} seats · ${Math.round(ms / 1000)}s`;
-          const hint = ` · /committee deliberation ${d.id}`;
-          const lines = [truncateToWidth(pad + theme.fg("dim", head + hint), width)];
-          if (open) lines.push(...new Markdown(current.text || "Waiting for the first exchange…", 0, 0, getMarkdownTheme()).render(Math.max(1, width - outputPad - 2)).map((line) => pad + theme.fg("dim", "│ ") + highlightTags(line)));
+          const head = `${open ? "▾" : "▸"} deliberation · ${dd.seats ?? 0} seats · ${status} · ${Math.round(ms / 1000)}s`;
+          const lines = [truncateToWidth(pad + theme.fg("dim", head), width)];
+          if (open) lines.push(...new Markdown(current.text || "Waiting for the first exchange…", 0, 0, getMarkdownTheme()).render(Math.max(1, width - pad.length - 2)).map((line) => truncateToWidth(pad + theme.fg("dim", "│ ") + highlightTags(line), width)));
           return lines;
         },
       };
@@ -886,26 +877,15 @@ export default function (pi: ExtensionAPI) {
     return {
       invalidate() {},
       render(width: number) {
-        const pad = " ".repeat(outputPad);
-        // a one eighth block: still a continuous line of color, without the heavy block the full cell made
-        const bar = `${ansi(color, "▏")} `;
-        const inner = Math.max(1, width - outputPad - 2);
+        const inset = Math.min(outputPad + 1, Math.max(0, Math.floor((width - 1) / 2)));
+        const pad = " ".repeat(inset);
+        const inner = Math.max(1, width - inset * 2);
         // speech is markdown (bold, lists, code); tool lines stay plain dim text. tags are colored after rendering so ANSI never sits inside the markdown source
         let body: string[];
         if (d.kind === "tool") body = wrapTextWithAnsi(ansi(244, content), inner);
         else { try { body = new Markdown(content, 0, 0, getMarkdownTheme()).render(inner).map(highlightTags); } catch { body = wrapTextWithAnsi(highlightTags(content), inner); } }
-        const seat = d.kind === "human" || d.kind === "tool" ? undefined : byId(d.author)?.meta ?? ghostOf(d.author);
-        const w = (d.data as any)?.tools as { calls: number; chars: number } | undefined;
-        // name on the left, cli:model #thinking (and the tool-work marker) right-aligned on the same line
-        const right = seat ? ansi(244, (w ? `⚙ ${w.calls} tool call${w.calls === 1 ? "" : "s"}, ${fmt(w.chars)} chars   ` : "") + seatMeta(seat)) : "";
-        const gap = width - outputPad - 2 - visibleWidth(name) - visibleWidth(right);
-        // the empty gap between the seat's name and its turn details carries a hairline rule, so the
-        // eye reads the head as one line rather than two columns
-        const rule = gap >= 8 ? `${theme.fg("dim", " ─" + "─".repeat(gap - 4) + "─ ")}` : " ".repeat(Math.max(0, gap));
-        const head = gap >= 2 ? `${name}${rule}${right}` : name;
-        const who = seat && gap < 2 ? [`${pad}${bar}${right}`] : [];
-        const lines = [`${pad}${bar}${head}`, ...who, ...body.map((l) => `${pad}${bar}${l}`)];
-        return d.kind === "speak" ? lines.map((line) => speakerBand(theme, line, width, color)) : lines;
+        const lines = ["", pad + truncateToWidth(name, inner), ...body.map((line) => pad + truncateToWidth(line, inner)), ""];
+        return d.kind === "speak" || d.kind === "human" ? lines.map((line) => speakerBand(theme, line, width, color)) : lines;
       },
     };
   });
