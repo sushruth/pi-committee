@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["discuss", "ready"]
+    },
+    "text": {
+      "type": "string",
+      "description": "your contribution to the discussion, including remaining objections"
+    },
+    "discovery": {
+      "type": "boolean",
+      "description": "true only when new evidence needs a temporary discussion extension"
+    },
+    "recap": {
+      "type": "string",
+      "maxLength": 1200,
+      "description": "current outcomes, unresolved disagreements and what the human needs to decide; preserve uncertainty"
+    }
+  },
+  "required": ["action"],
+  "additionalProperties": true,
+  "examples": [{"action": "discuss", "text": "the constraint we still need to resolve"}]
+}

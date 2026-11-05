@@ -6,38 +6,19 @@
       "enum": [
         "speak",
         "wait",
+        "deliberate",
         "yield",
         "silent"
       ]
     },
-    "intent": {
-      "type": "string",
-      "enum": [
-        "contribute",
-        "question",
-        "correct",
-        "warn",
-        "respond",
-        "invite",
-        "listen"
-      ]
-    },
     "topic": {
       "type": "string",
-      "maxLength": 160,
-      "description": "one sentence on what you would add; required only when preference is speak, omit it to hold cheaply"
+      "maxLength": 80,
+      "description": "a few words on your topic or vibe, never the answer; omit when holding"
     },
-    "length": {
-      "type": "string",
-      "enum": [
-        "short",
-        "long"
-      ]
-    },
-    "tool": {
-      "type": "string",
-      "maxLength": 160,
-      "description": "if you have tools and your turn needs a lookup: what you would run, one line; omit otherwise"
+    "discovery": {
+      "type": "boolean",
+      "description": "true only for new evidence that needs more discussion"
     }
   },
   "required": [
@@ -47,10 +28,7 @@
   "examples": [
     {
       "preference": "speak",
-      "intent": "contribute",
-      "topic": "one sentence under 20 words on what you would add",
-      "length": "short",
-      "tool": "only if you have tools: the work you would do for this turn, one line"
+      "topic": "one missing constraint"
     }
   ]
 }

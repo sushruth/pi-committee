@@ -19,6 +19,11 @@
     "text": {
       "type": "string"
     },
+    "recap": {
+      "type": "string",
+      "maxLength": 1200,
+      "description": "current outcomes, unresolved disagreements and what the human needs to decide; preserve uncertainty"
+    },
     "ref": {
       "type": "string",
       "description": "for action repeat: the event id of your earlier reply to re-show"
