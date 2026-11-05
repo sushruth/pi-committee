@@ -5,7 +5,7 @@ description: Run a conversation between a human and several independent LLM spea
 
 # Committee conversation
 
-A pi extension hosts the room. The host only moves messages, keeps the ledger and logs usage. Nobody schedules turns, nobody picks who speaks, there is no facilitator.
+A pi extension hosts the room, moves messages, keeps the ledger and logs usage. Seats decide when discussion is needed; the least-spoken participant reports its outcome.
 
 ## Run it
 
@@ -31,22 +31,29 @@ pi starts as plain pi in every folder; `/committee on` shows the room (replaying
 
 A removed seat (via `/seats`, or dropped at startup) becomes a ghost: a pale dot in the status row, its lines kept in the transcript, listed to the others as former so nobody addresses it.
 
-## Protocol: two phases per cycle
+## Protocol: coordination, optional deliberation, response
 
 A cycle starts after a human message or after someone spoke.
 
-1. **Intention**, all seats in parallel. Each returns `schemas/intention.schema.json`: preference (speak, wait, yield, silent), intent, a one-sentence topic.
-2. **Respond**, only seats that said `speak`, in parallel. Each sees everyone's intentions and returns `schemas/response.schema.json`: `speak` with the text, `repeat` with the event id of an earlier reply of its own, or `wait` / `silent`.
+1. **Intention**, available seats in parallel. Each returns `schemas/intention.schema.json`: preference `speak`, `wait`, or `deliberate`, with an optional few-word topic (at most 80 characters). Keep it to a signal and a vibe, never an argument or answer. Old `yield` and `silent` signals still hold.
+2. **Deliberation**, when requested by the human or a seat. Available participants exchange contributions using `schemas/deliberation.schema.json`: `discuss` while useful work remains, `ready` when the room can report. They may use their permitted tools. Preserve disagreements; readiness does not require unanimity. The full exchange stays in one expandable transcript block. The least-spoken participant reports back.
+3. **Respond**, seats with the floor return `schemas/response.schema.json`: `speak` with text, `repeat` with the event id of an earlier reply of their own, or `wait` / `silent`. Include a concise replacement `recap` covering outcomes, completed actions, unresolved disagreements and anything needed from the human since the latest human message.
+
+Speaking appetite halves every four rounds; deliberation weight halves every eight exchanges. Material new evidence may set `discovery: true` for a temporary boost: at most one per exchange, two per request, separated by four exchanges. The boost decays while the underlying weight continues falling. Do not request extensions for agreement or repeated points.
+
+Human messages enter the public log immediately. Pending messages reach each seat together, in order, on its next available turn; running calls finish. Treat steering as something to incorporate naturally, without restarting the conversation or treating every message as urgent. Explicit urgency, corrections and cancellation take priority. This applies during deliberation and regular conversation; never drop an earlier queued message because a later one arrived.
+
+The live recap appears above the editor. When the human sends a message, save exactly the displayed recap in a distinct transcript container immediately above that message, then start a fresh recap segment. Later results must not rewrite that snapshot. Recaps must preserve uncertainty and distinguish completed work from proposals.
 
 If exactly one seat wants to speak it is asked directly, without the intentions broadcast. Replies render as they arrive. A `repeat` re-shows the earlier line under the speaker's name, marked already answered, and does not start another cycle. When nobody speaks the room idles until the human types.
 
-Seats and people are referred to as "they" or "it", never with gendered pronouns. Rules every seat gets (see `rules` in committee.ts): one speaker per cycle normally, defer to who has spoken less, the last floor holder may finish a thought, ties mean everyone who claimed speaks briefly, SMS-style contributions: roughly 25 words, at most one most important remaining ask or point per turn, no recaps or advance announcements; never over 120 words unless the intention said long, tool output kept short if a seat ever has tools, a human message never goes unanswered (the last answerer repeats), never cite an intention as if spoken. Intention-phase text is private scaffolding: never mention, cite or discuss it in a spoken reply — not "X plans to Y", not "X said the same" — unless the exchange phases themselves are the subject. Reference only numbered transcript events; anything else reads to the human as a fabrication. Seats refer to each other by shorthand tags (initials of the id, e.g. `@sp` for simply-precise; a clash falls back to a longer form), listed in the roster; the transcript colors every tag in that seat's color. Humans use the same tags. When a message tags specific seats, the untagged seats stay silent unless they have a pressing, urgent matter (a safety problem, a factual error that would mislead, a conflict about to happen). Rules are versioned; a session that saw an older version gets the new text once.
+Seats and people are referred to as "they" or "it", never with gendered pronouns. Public replies stay SMS-style: roughly 25 words and one important answer or ask, longer only when the human needs detail. The structured recap is separate from the reply. Never cite coordination signals as spoken contributions. Use numbered transcript events for evidence and preserve unresolved objections in reports. Seats use shorthand tags from the roster; when a human tags specific seats, others hold unless they have a pressing correction or safety concern. Rules are versioned and delivered once when changed.
 
 ## Tools, per seat
 
 A seat's `tools` is `"read"` or `"all"` (onboarding asks; `/seats` changes it, which gives a fresh session). Read-only: claude with `--tools Read,Grep,Glob,Bash` and Edit/Write disallowed, opencode with a `speaker-tools` agent allowing read, grep, glob, list and bash. codex with its shell turned back on (`-c features.shell_tool=true -c features.unified_exec=true -c features.code_mode_host=true` on that seat's app-server) and `sandbox: read-only`, which its sandbox enforces. All: claude with `--permission-mode bypassPermissions` and its full tool set, opencode with a `speaker-all` agent allowing everything, codex with the same shell and `sandbox: workspace-write`, cursor with `--force`. No tools: cursor-agent has no flag that turns its tools off, so a cursor seat without tools fails every call with that error instead of quietly getting read tools. The room folder is their working directory. With "all" the only guard is the rule: plan and report unless the human asked for changes.
 
-Tool work is private to the seat: its calls and their output stay in its own session, the room sees only the reply, and the reply line carries a dim marker (⚙ N tool calls, M chars, kept in its session) for the human. While a seat works its cell in the status row carries a clock (`working 7s`) and, when a tool runs, the tool name (`⚙ bash 12s`); the click panel shows the full command in a `now` row. The row never changes height. claude, pi, codex (`item/started`) and cursor (`--output-format stream-json`) stream tool starts; opencode is polled every 1.5 s. The rules therefore tell seats to put what they found or did into the reply with numbers, paths and results, and to divide work through the intention's `tool` line (one line on the work they would do; a seat that has spoken less and named the same work gets it). Intention calls run with tools off (pi `--no-tools`, opencode the tool-less `speaker` agent, claude, codex and cursor a line in the prompt, since none of them can change tools per call without a new session) and the plain 120 second budget, so no seat can start working before the room has seen every intention. Seats with tools get a longer per-call budget: `toolTimeoutSeconds` in committee.json, default 600, against 120 for the rest.
+Tool work stays in the seat's native session; public replies share the material evidence, paths and results. The reply header counts tool calls and output characters, while seat details show live activity. Seats coordinate actual work during deliberation rather than expanding token-passing signals. Intention calls run with tools off and the plain 120-second budget. Seats with tools get `toolTimeoutSeconds` (default 600) for discussion and response calls.
 
 Cost: a tool round is an extra model step in that seat's session only (measured: a glob plus answer on glm was ~90 fresh tokens after the first call; claude's first tool call carried ~8k fresh because the tool schemas joined its prompt). On opencode, "all" also exposes the user's MCP servers through its code-mode tool, and one seat spent ~96k fresh tokens reading that catalogue; keep opencode seats on read-only unless they need to write.
 
@@ -75,7 +82,9 @@ Every call appends a `usage` event: phase, fresh, cached, out, cost when the pro
 
 - `committee.ts`: the extension. Config, replay, packets, cycle, rendering, `/seats`, `/committee`, `/usage`, onboarding.
 - `speaker.ts`: `Speaker` class, one per seat. `send(text, schema)` returns `{ok, payload, usage, session_id, resumed}`. The prompt ends with the schema's first `examples` entry, a filled-in object, because small models copy an example and echo a schema; the schema itself is only the host's check, so one session serves both phases. A prose reply gets one nudge to resend as JSON, since models that just used tools often forget.
-- `schemas/`: intention and response JSON schemas. Only `preference` and `topic` (intention) and `action` (response) are required; everything else is optional and extra keys are ignored, since small models drop fields. A reply in the other phase's shape is mapped (`action` to `preference` and back, `text` to `topic`) before the check, since models mix the two up.
+- `schemas/`: intention, deliberation and response JSON schemas. Only `preference` (intention) and `action` (deliberation/response) are required; optional fields tolerate small models dropping them. A reply in another phase's shape is mapped before the check, since models mix the phases up.
+- `conversation.ts`: compact topic normalization and the deliberation decay/boost budget.
+- `presentation.ts`: speaker background bands and recap containers.
 - `example.json`: a reference cast. Not loaded; onboarding writes the real one.
 - `smoke.ts`: `bun smoke.ts` from a room folder runs every seat in example.json for two turns, then kills and resumes each session.
 

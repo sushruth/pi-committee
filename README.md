@@ -21,7 +21,9 @@ Then run `pi` in any folder and type `/committee on` (or start with `pi --commit
 
 ## What's nice about it
 
-- **No scheduler.** Before anyone replies, each seat says in one line whether it has something to add. Seats that do see what the others plan to say, then reply or hold. While they decide, a live block shows each round; later it collapses. When nobody has anything new, the room goes quiet. The extension relays messages; it never picks who speaks.
+- **Quick coordination, room for discussion.** Seats pass a short speak, hold, or discuss signal with a few words on the topic. You or a seat can request a separate deliberation: everyone available exchanges views inside a collapsed block, then the seat that has spoken least reports back. Discussion weight decays over time; a discovery can briefly buy more room.
+- **Catch up at a glance.** A live recap above the input tracks outcomes, open questions and what the room needs from you. Sending a message saves the visible recap immediately above it, so later updates never rewrite what you knew when you spoke.
+- **Steer while they work.** Your messages enter together at the next available turn, without cancelling calls already running. Seats incorporate them naturally unless you explicitly ask for urgency or a change of course.
 - **One session per seat.** A seat only receives what it missed since its last call, and the provider's prompt cache holds the rest. Savings depend on the provider; some return no cache hits.
 - **Choose what each seat can touch.** None, read-only, or all tools, per seat. Enforcement varies by CLI.
 - **Restart your terminal, the room is still there.** The log and sessions live in the folder, and `committee.json` is shareable. Each room also writes a real pi session (named by room id) so it can appear in pi's own `/resume`; that mirror currently records your messages only, starting from the next one, so older rooms show up once you speak in them again.
@@ -29,7 +31,8 @@ Then run `pi` in any folder and type `/committee on` (or start with `pi --commit
 ## Commands
 
 - `/committee on | off | pause | resume | fresh | reset`: `fresh` starts a new chat with the same seats; `reset` deletes the room
-- `/committee deliberation [id]`: expand a collapsed round (the per-turn intentions line; "deliberation" language predates the rename)
+- `/committee deliberation [id]`: expand or collapse a discussion; its header also toggles on click
+- `/committee discuss`: ask the room to deliberate on the current conversation
 - `/committee brief <text or file>`: what every seat should know about this folder
 - `/resume-committee`: pick an earlier conversation in this folder and continue it, seats and all
 - `/seats`: add, change or remove seats
@@ -39,3 +42,7 @@ Then run `pi` in any folder and type `/committee on` (or start with `pi --commit
 ## Not here
 
 - Cursor Agent. It adds about 13,500 tokens of its own prompt per call and can't turn tools off.
+
+## Development
+
+Run `bun install` and `bun test`. Rendering tests use the same pi framework packages as the extension; flow tests use simulated seats and make no model calls.
