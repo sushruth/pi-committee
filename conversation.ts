@@ -2,6 +2,12 @@ export function compactTopic(value: unknown): string {
   return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 80) : "";
 }
 
+export function distinctRecap(value: unknown, text: string): string {
+  if (typeof value !== "string") return "";
+  const recap = value.trim();
+  return recap.replace(/\s+/g, " ") === text.trim().replace(/\s+/g, " ") ? "" : recap.slice(0, 1200);
+}
+
 export function discussionWeight(round: number, boostRound?: number): number {
   const bonus = boostRound === undefined ? 0 : 0.25 * Math.pow(2, -(round - boostRound) / 2);
   return Math.min(1, Math.pow(2, -round / 8) + bonus);

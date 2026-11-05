@@ -16,7 +16,7 @@
     "recap": {
       "type": "string",
       "maxLength": 1200,
-      "description": "current outcomes, unresolved disagreements and what the human needs to decide; preserve uncertainty"
+      "description": "1–3 short sentences synthesizing outcomes, unresolved disagreements and decisions needed; never copy text; preserve uncertainty"
     }
   },
   "required": ["action"],

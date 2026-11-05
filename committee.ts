@@ -2,7 +2,7 @@ import { titleFrom, roomLabel } from "./title.ts";
 import { focusFromText, focusFromQueue } from "./routing.ts";
 import { reportedCost } from "./accounting.ts";
 import { recapBox, speakerBand } from "./presentation.ts";
-import { DiscussionBudget, compactTopic } from "./conversation.ts";
+import { DiscussionBudget, compactTopic, distinctRecap } from "./conversation.ts";
 // pi extension: the host for a committee conversation.
 //   pi --no-tools --no-mcp --no-skills --no-session --no-extensions --no-context-files --no-prompt-templates \
 //      -e ~/.agents/skills/committee-conversation/committee.ts
@@ -903,7 +903,7 @@ A human message never goes unanswered: if nobody has anything new to add, whoeve
 Tools: your calls and output stay in your own session, so share material evidence, paths and results in your contribution. Orient yourself from the room's files when needed. Keep tool output small. Tools are off during token passing; lookups happen in deliberation or your response. Plan and report by default; change files only when the human asked, and only with full tools.
 Phases, always JSON: intention is tiny token passing, preference speak, wait, or deliberate, and an optional topic of a few words (at most 80 characters). Never put an answer or argument there. Choose deliberate when the human requests discussion or the room needs to exchange evidence, resolve disagreement or coordinate work. Deliberation is an expandable discussion among seats: action discuss with your contribution, or ready when the room can report; readiness does not require unanimous agreement. Flag discovery only for material new evidence needing extra discussion, never to repeat an old point. The least-spoken seat reports the outcome, unresolved objections and anything needed from the human. Respond with action speak and text, wait/silent to hold, or repeat and ref for an earlier reply of yours.
 Human messages arrive together at your next available turn. Absorb them without treating each as a restart or emergency; work them in when practical. Explicit urgency, corrections and cancellation take priority. Never ignore an earlier queued message because a later one arrived.
-Every public response also includes recap: a concise replacement for the running recap since the latest human message. Merge prior outcomes with new findings, completed actions, unresolved disagreement and any decision needed from the human. Cite event ids for earlier claims. Do not invent consensus or describe unperformed work as done. A new human message starts a fresh recap segment.`;
+Every public response also includes recap: a short synthesis of the running discussion since the latest human message, never a copy of your reply. Aim for 1–3 short sentences. Merge prior outcomes with new findings, completed actions, unresolved disagreement and any decision needed from the human. Cite event ids for earlier claims. Do not invent consensus or describe unperformed work as done. A new human message starts a fresh recap segment.`;
   const rulesText = () => `Etiquette: ${cfg.etiquette}\n${rules}${briefOf() ? `\nAbout this room, from the human who set it up:\n${briefOf()}` : ""}`;
   const rulesVersion = () => createHash("sha1").update(rulesText()).digest("hex").slice(0, 8);
   const line = (e: Event) => `[${e.id} ${e.author}] ${e.text}`;
@@ -947,7 +947,7 @@ Every public response also includes recap: a concise replacement for the running
         const reporter = seats.slice().sort((a, b) => a.stat.turns - b.stat.turns)[0];
         for (const s of seats) setState(s.meta.id, "thinking");
         const said = await Promise.all(seats.map(async (s) => {
-          const r = await s.session.send(packet(s, "deliberation", `Discussion weight ${Math.round(weight * 100)}%, exchange ${state.discussion.round}. ${weight < WRAP_UP ? "Report now; preserve any unresolved disagreement. Return action ready with your final position in text." : "Discuss freely with the other seats; do not address the human. Return action discuss to continue or ready when the room can report, with your contribution in text."} Set discovery:true only for material new evidence needing more time. Read queued human messages naturally; urgency is explicit, not implied by arrival.${s === reporter ? ` Also return recap: update the running summary of outcomes, unsettled points and questions for the human, preserving significant earlier outcomes. Current recap: ${liveRecap || "(none)"}.` : ""}${board ? `\nPrevious exchange:\n${board}` : ""}\n`), deliberationSchema, budget(s));
+          const r = await s.session.send(packet(s, "deliberation", `Discussion weight ${Math.round(weight * 100)}%, exchange ${state.discussion.round}. ${weight < WRAP_UP ? "Report now; preserve any unresolved disagreement. Return action ready with your final position in text." : "Discuss freely with the other seats; do not address the human. Return action discuss to continue or ready when the room can report, with your contribution in text."} Set discovery:true only for material new evidence needing more time. Read queued human messages naturally; urgency is explicit, not implied by arrival.${s === reporter ? ` Also return recap: synthesize in 1–3 short sentences, never copy your contribution. Update the running summary of outcomes, unsettled points and questions for the human, preserving significant earlier outcomes. Current recap: ${liveRecap || "(none)"}.` : ""}${board ? `\nPrevious exchange:\n${board}` : ""}\n`), deliberationSchema, budget(s));
           if (!roomGen.accepts(tok)) return r;
           account(r, "deliberation");
           if (r.ok) { s.sent = s.pendingSent ?? s.sent; failedHumans.delete(s.meta.id); pruneQueue(); }
@@ -958,8 +958,9 @@ Every public response also includes recap: a concise replacement for the running
         const successful = said.filter((r) => r.ok);
         board = said.map((r) => r.ok ? `${r.speaker}: ${String((r.payload as any)?.text ?? "").trim()} [${(r.payload as any)?.action}]` : `${r.speaker}: call failed (${r.error})`).join("\n");
         exchange.text += `${exchange.text ? "\n\n" : ""}Exchange ${state.discussion.round}\n${board}`;
-        const report = successful.find((r) => r.speaker === reporter.meta.id)?.payload as { recap?: unknown } | undefined;
-        if (humanAtStart === lastHumanId && typeof report?.recap === "string" && report.recap.trim()) { liveRecap = report.recap.trim().slice(0, 1200); drawRecap(); }
+        const report = successful.find((r) => r.speaker === reporter.meta.id)?.payload as { recap?: unknown; text?: string } | undefined;
+        const update = distinctRecap(report?.recap, report?.text ?? "");
+        if (humanAtStart === lastHumanId && update) { liveRecap = update; drawRecap(); }
         exchange.data = { turn: state.discussion.round, seats: seats.length, started, ms: Date.now() - started, status: "running", ...(humanAtStart === lastHumanId ? { recap: liveRecap, recapAfter } : {}) };
         appendFileSync(logPath, JSON.stringify({ ts: Date.now(), ...exchange }) + "\n");
         refresh(); saveSessions();
@@ -993,8 +994,8 @@ Every public response also includes recap: a concise replacement for the running
     }
     const st = byId(r.speaker)?.stat; if (st) st.lastReply = p.action === "speak" ? text : `(${p.action})`;
     if (p.action === "speak" && text) {
-      const update = typeof p.recap === "string" && p.recap.trim() ? p.recap.trim().slice(0, 1200) : text.slice(0, 1200);
-      const recap = base === liveRecap ? update : [...new Set([liveRecap, update].filter(Boolean))].join("\n");
+      const update = distinctRecap(p.recap, text);
+      const recap = !update ? liveRecap : base === liveRecap ? update : [...new Set([liveRecap, update].filter(Boolean))].join("\n");
       setState(r.speaker, "spoke"); publish({ author: r.speaker, kind: "speak", text, data: { ...(r.tools ? { tools: r.tools } : {}), ...(after === recapAfter ? { recap, recapAfter: after } : {}) } });
       drawRecap(); return 1;
     }
@@ -1143,7 +1144,7 @@ Every public response also includes recap: a concise replacement for the running
     const recapBase = liveRecap;
     s.inflight = true; pendingReplies++; syncBusy();
     setState(s.meta.id, s.meta.tools ? "working" : "replying");
-    void s.session.send(packet(s, "respond", extra + appetiteLine(state) + `Return recap as a concise updated summary since the latest human message: outcomes, completed actions, unsettled points, and anything needed from the human. Preserve significant earlier outcomes. Current recap:\n${liveRecap || "(none yet)"}\n`), responseSchema, budget(s))
+    void s.session.send(packet(s, "respond", extra + appetiteLine(state) + `Return recap as a synthesis in 1–3 short sentences, never a copy of your reply, since the latest human message: outcomes, completed actions, unsettled points, and anything needed from the human. Preserve significant earlier outcomes. Current recap:\n${liveRecap || "(none yet)"}\n`), responseSchema, budget(s))
       .then((r) => {
         if (!roomGen.accepts(tok)) return;
         account(r, "respond");

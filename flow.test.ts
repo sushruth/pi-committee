@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { DiscussionBudget, compactTopic } from "./conversation.ts";
+import { DiscussionBudget, compactTopic, distinctRecap } from "./conversation.ts";
 
 const source = readFileSync(new URL("./committee.ts", import.meta.url), "utf8");
 const section = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -17,7 +17,7 @@ const production = [
 ].join("\n");
 
 function harness(send?: (id: string, text: string) => Promise<any>) {
-  const create = new Function("DiscussionBudget", "compactTopic", "send", new Bun.Transpiler({ loader: "ts" }).transformSync(`
+  const create = new Function("DiscussionBudget", "compactTopic", "distinctRecap", "send", new Bun.Transpiler({ loader: "ts" }).transformSync(`
     const PUBLIC = ["human", "speak", "error"];
     const events = [], displayed = [], disk = [], microtasks = [], rounds = [], dispatched = [];
     const queued = [], queuedIds = [], pausedTexts = [], failedHumans = new Map();
@@ -60,7 +60,7 @@ function harness(send?: (id: string, text: string) => Promise<any>) {
       getRecap:()=>liveRecap, getAfter:()=>recapAfter,
       flush:()=>microtasks.splice(0).forEach((fn)=>fn())};
   `));
-  return create(DiscussionBudget, compactTopic, send ?? (async (id) => ({ speaker: id, ok: true, payload: { action: "ready" } })));
+  return create(DiscussionBudget, compactTopic, distinctRecap, send ?? (async (id) => ({ speaker: id, ok: true, payload: { action: "ready" } })));
 }
 
 test("submitting snapshots the exact displayed recap immediately before the human message", async () => {
@@ -108,10 +108,29 @@ test("late response recap cannot overwrite the new human segment", async () => {
   expect(h.events.at(-1).text).toBe("Late answer");
 });
 
+test("missing or copied recaps preserve the existing summary without copying the reply", async () => {
+  const h = harness(); await h.input("request");
+  for (const prior of ["", "Existing finding"]) {
+    h.setRecap(prior);
+    for (const recap of [undefined, "", "  Full\n answer  "]) {
+      h.takeReply({ speaker: "a", ok: true, payload: { action: "speak", text: "Full answer", recap } });
+      expect(h.getRecap()).toBe(prior);
+      expect(h.events.at(-1).text).toBe("Full answer");
+    }
+  }
+});
+
+test("deliberation rejects a copied recap and keeps the prior synthesis", async () => {
+  const h = harness(async (speaker) => ({ speaker, ok: true, payload: { action: "ready", text: "My contribution", recap: "My contribution" } }));
+  await h.input("request"); h.setRecap("Existing finding");
+  await h.deliberate(h.state);
+  expect(h.getRecap()).toBe("Existing finding");
+});
+
 test("concurrent reports retain both outcomes and repeats do not start another cycle", async () => {
   const h = harness(); await h.input("request");
   for (const [speaker, recap] of [["a", "First outcome"], ["b", "Second outcome"]]) {
-    h.takeReply({ speaker, ok: true, payload: { action: "speak", text: recap, recap } }, h.getAfter(), "");
+    h.takeReply({ speaker, ok: true, payload: { action: "speak", text: `Details about ${recap}`, recap } }, h.getAfter(), "");
   }
   expect(h.getRecap()).toBe("First outcome\nSecond outcome");
   expect(h.takeReply({ speaker: "a", ok: true, payload: { action: "repeat", ref: h.events.find((e: any) => e.author === "a").id } })).toBe(0);
