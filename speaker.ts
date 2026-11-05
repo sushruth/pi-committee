@@ -326,13 +326,19 @@ export class Speaker {
 // models mix up the two shapes (an intention answered as a response, or the reverse); map what can be mapped
 function coerce(p: Record<string, unknown>, schema: object) {
   const want = ((schema as any).required ?? []) as string[];
+  const discussion = ((schema as any).properties?.action?.enum ?? []).includes("discuss");
   if (want.includes("preference") && !("preference" in p) && typeof p.action === "string") {
-    p.preference = p.action === "speak" || p.action === "repeat" ? "speak" : p.action === "silent" ? "silent" : "wait";
-    p.topic ??= typeof p.text === "string" ? p.text.slice(0, 160) : "";
+    p.preference = p.action === "discuss" ? "deliberate" : p.action === "speak" || p.action === "repeat" || p.action === "ready" ? "speak" : p.action === "silent" ? "silent" : "wait";
+    p.topic ??= typeof p.text === "string" ? p.text.replace(/\s+/g, " ").trim().slice(0, 80) : "";
   }
   if (want.includes("topic") && !("topic" in p)) p.topic = "";
   if (want.includes("action") && !("action" in p) && typeof p.preference === "string") {
-    p.action = p.preference === "speak" && typeof p.text === "string" && p.text.trim() ? "speak" : p.preference === "silent" ? "silent" : "wait";
+    p.action = discussion ? p.preference === "speak" || p.preference === "deliberate" ? "discuss" : "ready"
+      : p.preference === "speak" && typeof p.text === "string" && p.text.trim() ? "speak" : p.preference === "silent" ? "silent" : "wait";
+  }
+  if (discussion) {
+    if (p.action === "speak" || p.action === "repeat") p.action = "discuss";
+    else if (p.action === "wait" || p.action === "silent" || p.action === "yield") p.action = "ready";
   }
 }
 
