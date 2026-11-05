@@ -46,7 +46,7 @@ interface Seat { id: string; cli: Cli; model: string; thinking?: string; persona
 // a seat that left the room; its lines stay in the transcript, it stays visible as a pale dot
 interface Ghost { id: string; cli: Cli; model: string; thinking?: string; left: string }
 type Kind = "human" | "speak" | "error" | "intention" | "deliberation" | "phase" | "usage" | "tool" | "recap";
-interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown }
+interface Event { id: string; cycle: number; author: string; text: string; kind: Kind; data?: unknown; roomId?: string }
 interface Stat { state: string; since: number; activity?: string; ctx?: number; window?: number; fresh: number; cached: number; out: number; cost: number; calls: number; turns: number; lastSpoke: number; lastIntent?: string; intentStamp?: number; lastReply?: string }
 interface Saved { cli: Cli; model: string; thinking?: string; tools?: Tools; session_id?: string; sent: number; rules?: string }
 const PUBLIC: Kind[] = ["human", "speak", "error"]; // "tool" events from older logs are history only
@@ -170,6 +170,7 @@ export default function (pi: ExtensionAPI) {
   const events: Event[] = [];
   let cycleNo = 0;
   let floorHolder: string | null = null;
+  const currentRoomTitle = () => titleFrom(events.find((e) => e.kind === "human")?.text ?? "");
   let liveRecap = "";
   let recapStatus: "discussing" | "finished" = "discussing";
   let recapAfter = "";
@@ -200,6 +201,8 @@ export default function (pi: ExtensionAPI) {
       const fresh = !(saved && existsSync(saved));
       if (piFile && saved && piFile === saved) return;
       roomSession = fresh ? SessionManager.create(cwd, undefined, { id: roomId }) : SessionManager.open(saved!, undefined, cwd);
+      const name = roomSession.getSessionName();
+      if (!name || name.startsWith("⚒ ")) roomSession.appendSessionInfo(`⚒ ${currentRoomTitle()}`);
       // lifecycle.roomBinding looks for exactly this entry on resume; without it the room is listed but never reattaches
       if (fresh) roomSession.appendCustomEntry("committee-room", { roomId });
       roomSession.appendMessage({ role: "user", content: text, timestamp: Date.now() });
@@ -208,13 +211,14 @@ export default function (pi: ExtensionAPI) {
     } catch (e) { appendFileSync(diagPath, JSON.stringify({ ts: Date.now(), phase: "mirror", error: String(e) }) + "\n"); }
     roomSession = undefined;
   };
+  const displayEvent = (ev: Event) => pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: { ...ev, roomId } });
   const publish = (e: Omit<Event, "id" | "cycle">) => {
     const ev: Event = { id: `event-${events.length + 1}`, cycle: cycleNo, ...e };
     record(ev);
     appendFileSync(logPath, JSON.stringify({ ts: Date.now(), ...ev }) + "\n");
     // PUBLIC decides what reaches a seat's delta; display is a separate question. A deliberation
     // round is shown to the human and never sent to seats, so it gets its own display path.
-    if (PUBLIC.includes(ev.kind) || ev.kind === "deliberation" || ev.kind === "phase" || ev.kind === "recap") pi.sendMessage({ customType: "committee", content: ev.text, display: true, details: ev });
+    if (PUBLIC.includes(ev.kind) || ev.kind === "deliberation" || ev.kind === "phase" || ev.kind === "recap") displayEvent(ev);
     if (ev.kind === "human") mirror(ev.text);
     return ev;
   };
@@ -467,6 +471,13 @@ export default function (pi: ExtensionAPI) {
     boot();
     if (shown) return; shown = true;
     if (speakers.length) await checkEngines(ctx);
+    const entries = ctx.sessionManager.getBranch();
+    const displayed = entries.filter((e) => e.type === "custom_message" && e.customType === "committee" && e.display).map((e) => (e as { details?: Event }).details);
+    for (const ev of events) {
+      if (!(PUBLIC.includes(ev.kind) || ev.kind === "deliberation" || ev.kind === "phase" || ev.kind === "recap")) continue;
+      if (displayed.some((d) => d?.id === ev.id && (d.roomId ? d.roomId === roomId : d.kind === ev.kind && d.author === ev.author && d.text === ev.text))) continue;
+      displayEvent(ev);
+    }
     const resumed = speakers.filter((s) => s.sent > 0).map((s) => s.meta.id);
     if (events.length) ctx.ui.notify(`replayed ${events.filter((e) => PUBLIC.includes(e.kind)).length} messages; resuming sessions for ${resumed.length ? resumed.join(", ") : "nobody"}`, "info");
   };
@@ -559,7 +570,8 @@ export default function (pi: ExtensionAPI) {
     if (!active && speakers.length === 0 && !(await onboarding(ctx))) return ctx.ui.notify("no seats, committee stays off", "warning");
     // make this pi session findable in the native /resume list, and remember which room it belongs to
     try {
-      if (!pi.getSessionName()) pi.setSessionName(`⚒ ${roomId}`);
+      const name = pi.getSessionName();
+      if (!name || name.startsWith("⚒ ")) pi.setSessionName(`⚒ ${currentRoomTitle()}`);
       pi.appendEntry("committee-room", { roomId });
     } catch {}
     await show(ctx);
@@ -713,7 +725,7 @@ export default function (pi: ExtensionAPI) {
     const pick = choice ? labels.get(choice) : undefined;
     if (!pick) return;
     switchRoom(pick); await enableMode(ctx);
-    ctx.ui.notify(`resumed room ${pick}`, "info");
+    ctx.ui.notify(`resumed room: ${currentRoomTitle()}`, "info");
   };
   pi.registerCommand("resume-committee", {
     description: "Resume an earlier conversation in this folder; the current room stays on disk, and the seats' native sessions are reattached",
@@ -851,7 +863,7 @@ export default function (pi: ExtensionAPI) {
           return { handled: true };
         },
         render(width: number) {
-          const current = events.find((e) => e.id === d.id) ?? d;
+          const current = (!d.roomId || d.roomId === roomId ? events.find((e) => e.id === d.id) : undefined) ?? d;
           const dd = (current.data ?? {}) as { turn?: number; seats?: number; ms?: number; started?: number; status?: string };
           const pad = " ".repeat(outputPad);
           const open = expanded || expandedDeliberations.has(d.id);
